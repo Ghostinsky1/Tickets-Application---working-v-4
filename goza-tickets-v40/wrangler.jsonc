@@ -1,0 +1,9 @@
+{
+  "name": "goza-tickets",
+  "compatibility_date": "2026-08-01",
+  "main": "worker.js",
+  "assets": {
+    "directory": "./out",
+    "binding": "ASSETS"
+  }
+}
