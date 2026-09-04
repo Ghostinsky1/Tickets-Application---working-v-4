@@ -1,7 +1,12 @@
 {
-  "name": "goza-tickets",
-  "compatibility_date": "2026-08-01",
+  "name": "gozaweb",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-15",
   "assets": {
-    "directory": "./out"
+    "directory": ".",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
   }
 }
