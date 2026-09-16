@@ -1,21 +1,8 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "latinbp",
-  "main": "src/worker.js",
+  "name": "promtp",
   "compatibility_date": "2026-08-01",
-
   "assets": {
-    "directory": "./public",
-    "binding": "ASSETS",
-    "html_handling": "none",
-    "not_found_handling": "none",
-    "run_worker_first": true
-  },
-
-
-  "routes": [
-    { "pattern": "latinbp.gozaentertainment.com", "custom_domain": true }
-  ],
-
-  "observability": { "enabled": true }
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
 }
