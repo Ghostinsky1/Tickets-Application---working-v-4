@@ -1,0 +1,2509 @@
+'use client';
+
+/*
+  ADMIN v2 — Desenfocado chrome style. Multi-event.
+  Tabs: Events (create/edit shows, descriptions, ticket types, flyer, page link),
+  Dashboard, Roster, Fees — all scoped to the selected event.
+  Auth: passcode → x-admin-key → ADMIN_KEY secret. Key in sessionStorage only.
+*/
+
+import { useState, useEffect, useCallback } from 'react';
+import qrcode from 'qrcode-generator';
+import { BACKEND, DEFAULT_EVENT_ID, money, fmtDate } from '@/lib/api';
+import CardCheckout from '@/components/CardCheckout';
+
+// PROMOTER OS design system: electric blue ground, black objects, ice chrome.
+// ONE blue: #1140F0 carries every accent. Nothing pale.
+const T = {
+  blue: '#1140F0', blueLift: '#2E58FF', navy: '#0A2AA8', ice: '#1140F0', iceDeep: '#1140F0',
+  // old names kept so every existing usage inherits the brand blue
+  red: '#1140F0', redBright: '#1140F0', chrome: '#1140F0',
+  dim: '#9AA5B5', white: '#FFFFFF', text: '#D6DCE6',
+  line: '#232936', line2: '#1B202A',
+  card: '#0E1116', deep: '#0B0E13', black: '#07080C',
+  good: '#4ADE80', warn: '#FFB86B', bad: '#FF6B6B',
+};
+const DISPLAY = "'Archivo Black', Impact, Haettenschweiler, sans-serif";
+const HEAD = "'Chakra Petch', 'Trebuchet MS', sans-serif";
+const BODY = "'Saira Condensed', 'Arial Narrow', Arial, sans-serif";
+// glossy card + chrome control recipes from the guide
+const CHROME_BG = 'linear-gradient(180deg,#2E58FF 0%,#1140F0 100%)';
+const GLASS_BG = 'linear-gradient(180deg,#1B2130 0%,#11151C 100%)';
+const PANEL_BG = 'linear-gradient(180deg,#141821 0%,#0B0E13 100%)';
+
+async function adminApi(key: string, action: string, extra: any = {}) {
+  const res = await fetch(`${BACKEND}/admin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': key },
+    body: JSON.stringify({ action, ...extra }),
+  });
+  const body = await res.json().catch(() => ({ error: `Server ${res.status}` }));
+  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  return body;
+}
+
+export default function Admin() {
+  const [key, setKey] = useState('');
+  const [authed, setAuthed] = useState(false);
+  useEffect(() => {
+    const k = sessionStorage.getItem('gz_admin_key');
+    if (k) { setKey(k); setAuthed(true); }
+  }, []);
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#000', fontFamily: BODY, color: T.text }}>
+      <style>{`
+        * { box-sizing: border-box; }
+        input:focus, button:focus, textarea:focus, select:focus { outline: 1px solid ${T.red}; }
+        ::placeholder { color: #6a6060; }
+      `}</style>
+      {authed
+        ? <Panel adminKey={key} onLogout={() => { sessionStorage.removeItem('gz_admin_key'); setAuthed(false); setKey(''); }} />
+        : <Login onOk={(k) => { sessionStorage.setItem('gz_admin_key', k); setKey(k); setAuthed(true); }} />}
+    </div>
+  );
+}
+
+/* ---------------- LOGIN ---------------- */
+function Login({ onOk }: { onOk: (k: string) => void }) {
+  const [pass, setPass] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!pass.trim()) return;
+    setBusy(true); setErr('');
+    try { await adminApi(pass.trim(), 'login'); onOk(pass.trim()); }
+    catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ width: '100%', maxWidth: 380, background: T.card, border: `1px solid ${T.line}`, padding: '40px 32px', textAlign: 'center' }}>
+        <img src="/goza-os-logo.png" alt="Goza OS" style={{ height: 34, width: 'auto', margin: '0 auto 10px', display: 'block' }} />
+        <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 6, textTransform: 'uppercase', color: T.dim, margin: '0 0 30px' }}>Admin Panel</p>
+        <input type="password" value={pass} placeholder="PASSCODE"
+          onChange={(e) => setPass(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()}
+          style={{ width: '100%', background: '#141418', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 12, color: T.white, fontFamily: BODY, fontWeight: 400, fontSize: 16, padding: '14px 16px', letterSpacing: 2, textAlign: 'center', outline: 'none', boxSizing: 'border-box' }} />
+        {err && <p style={{ color: T.redBright, fontSize: 12.5, margin: '12px 0 0' }}>{err}</p>}
+        <button onClick={go} disabled={busy || !pass.trim()}
+          style={{ width: '100%', marginTop: 18, background: T.red, border: 'none', color: T.white, fontFamily: HEAD, fontWeight: 900, fontSize: 14, letterSpacing: 5, padding: '13px 0', cursor: 'pointer', opacity: busy || !pass.trim() ? 0.5 : 1 }}>
+          {busy ? 'CHECKING…' : 'ENTER'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- PANEL ---------------- */
+const NAV = [
+  { id: 'events', label: 'Events' },
+  { id: 'boxoffice', label: 'Box Office' },
+  { id: 'products', label: 'Products' },
+  { id: 'dash', label: 'Dashboard' },
+  { id: 'door', label: 'Door & Tickets' },
+  { id: 'marketing', label: 'Marketing' },
+  { id: 'bar', label: 'Bar' },
+  { id: 'orders', label: 'Orders' },
+  { id: 'roster', label: 'Roster' },
+  { id: 'fees', label: 'Fees' },
+  { id: 'appearance', label: 'Appearance' },
+] as const;
+type Tab = (typeof NAV)[number]['id'];
+
+function Panel({ adminKey, onLogout }: { adminKey: string; onLogout: () => void }) {
+  const [tab, setTab] = useState<Tab>('events');
+  useEffect(() => {
+    // returning from a box-office card charge -> show the Box Office tab
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('boxoffice') === 'done') {
+      setTab('boxoffice');
+    }
+  }, []);
+  const [events, setEvents] = useState<any[]>([]);
+  const [eventId, setEventId] = useState(DEFAULT_EVENT_ID);
+  const [evErr, setEvErr] = useState('');
+
+  const loadEvents = useCallback(() => {
+    setEvErr('');
+    adminApi(adminKey, 'list_events')
+      .then((d) => {
+        setEvents(d.events);
+        if (d.events.length && !d.events.find((e: any) => e.id === eventId)) setEventId(d.events[0].id);
+      })
+      .catch((e) => setEvErr(e.message));
+  }, [adminKey, eventId]);
+  useEffect(() => { loadEvents(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const current = events.find((e) => e.id === eventId);
+
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', flexWrap: 'wrap', background: '#000', backgroundAttachment: 'fixed', fontFamily: BODY }}>
+      <aside style={{ width: 220, borderRight: `1px solid ${T.line}`, display: 'flex', flexDirection: 'column', background: 'rgba(8,8,12,0.55)', backdropFilter: 'blur(8px)', flexShrink: 0 }}>
+        <div style={{ padding: '22px 16px 18px', borderBottom: `1px solid ${T.line}`, textAlign: 'center' }}>
+          <img src="/goza-os-logo.png" alt="Goza OS" style={{ height: 24, width: 'auto', display: 'block' }} />
+          <p style={{ fontFamily: HEAD, fontWeight: 600, fontSize: 10.5, letterSpacing: 1, color: T.red, margin: '5px 0 0' }}>Admin</p>
+        </div>
+        <nav style={{ flex: 1, padding: '14px 0' }}>
+          {NAV.map((n) => (
+            <button key={n.id} onClick={() => setTab(n.id)}
+              style={{ display: 'block', width: 'calc(100% - 16px)', margin: '2px 8px', textAlign: 'left', padding: '11px 16px', borderRadius: 10, fontFamily: HEAD, fontWeight: 600, fontSize: 14.5, letterSpacing: -0.1, background: tab === n.id ? T.blue : 'none', border: 'none', color: tab === n.id ? '#fff' : T.dim, cursor: 'pointer', transition: 'background 0.12s' }}>
+              {n.label}
+            </button>
+          ))}
+        </nav>
+        <div style={{ padding: '16px 20px', borderTop: `1px solid ${T.line}` }}>
+          <button onClick={onLogout} style={{ background: 'none', border: 'none', color: T.dim, fontFamily: HEAD, fontWeight: 600, fontSize: 13.5, letterSpacing: 0, cursor: 'pointer', padding: 0 }}>Log out</button>
+        </div>
+      </aside>
+
+      <main style={{ flex: 1, minWidth: 300, padding: '26px 26px 60px' }}>
+        {/* event selector — everything below is scoped to it */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 22 }}>
+          <span style={{ fontFamily: HEAD, fontWeight: 600, fontSize: 12.5, letterSpacing: 0, color: T.dim }}>Event</span>
+          <select value={eventId} onChange={(e) => setEventId(e.target.value)}
+            style={{ background: '#141418', border: `1px solid rgba(255,255,255,0.12)`, borderRadius: 12, color: T.white, fontFamily: BODY, fontSize: 14.5, padding: '11px 14px', minWidth: 240 }}>
+            {events.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            {!events.length && <option value={eventId}>Loading events…</option>}
+          </select>
+          {current && (
+            <a href={`/e?id=${current.id}`} target="_blank" rel="noreferrer"
+              style={{ fontFamily: HEAD, fontWeight: 600, fontSize: 12.5, color: '#fff', textDecoration: 'none', background: 'rgba(255,255,255,0.06)', border: `1px solid rgba(255,255,255,0.14)`, borderRadius: 20, padding: '9px 16px' }}>
+              View page ↗
+            </a>
+          )}
+          {current && (
+            <a href={`/scan?e=${current.id}`} target="_blank" rel="noreferrer"
+              style={{ fontFamily: HEAD, fontWeight: 600, fontSize: 12.5, color: '#fff', textDecoration: 'none', background: 'rgba(255,255,255,0.06)', border: `1px solid rgba(255,255,255,0.14)`, borderRadius: 20, padding: '9px 16px' }}>
+              Scanner ↗
+            </a>
+          )}
+        </div>
+        {evErr && <Err msg={evErr} retry={loadEvents} />}
+
+        {tab === 'events' && eventId && <EventMode adminKey={adminKey} eventId={eventId} />}
+        {tab === 'events' && <Events adminKey={adminKey} events={events} eventId={eventId} setEventId={setEventId} refresh={loadEvents} />}
+        {tab === 'boxoffice' && <BoxOffice adminKey={adminKey} events={events} eventId={eventId} setEventId={setEventId} />}
+        {tab === 'dash' && <Dashboard adminKey={adminKey} eventId={eventId} />}
+
+        {/* ---- DOOR & TICKETS: everything you touch on show night ---- */}
+        {tab === 'door' && !eventId && <p style={{ color: T.dim }}>Pick an event first.</p>}
+        {tab === 'door' && eventId && (
+          <>
+            <DoorCheckIn adminKey={adminKey} eventId={eventId} />
+            <PrintTickets adminKey={adminKey} eventId={eventId} />
+            <SeatingManager adminKey={adminKey} eventId={eventId} />
+          </>
+        )}
+
+        {/* ---- MARKETING: everything that reaches out to people ---- */}
+        {tab === 'marketing' && !eventId && <p style={{ color: T.dim }}>Pick an event first.</p>}
+        {tab === 'marketing' && eventId && (
+          <>
+            <BlastCenter adminKey={adminKey} eventId={eventId} />
+            <AbandonedList adminKey={adminKey} eventId={eventId} />
+            <PromoLinks adminKey={adminKey} eventId={eventId} />
+            <DropBlast adminKey={adminKey} eventId={eventId} signups={0} />
+          </>
+        )}
+
+        {/* ---- BAR ---- */}
+        {tab === 'bar' && (eventId ? (
+          <>
+            <StaffAccess adminKey={adminKey} eventId={eventId} events={events} />
+            <BarMenu adminKey={adminKey} eventId={eventId} />
+          </>
+        ) : <p style={{ color: T.dim }}>Pick an event first.</p>)}
+        {tab === 'orders' && <Orders adminKey={adminKey} eventId={eventId} />}
+        {tab === 'roster' && <Roster adminKey={adminKey} eventId={eventId} />}
+        {tab === 'fees' && <Fees adminKey={adminKey} eventId={eventId} />}
+        {tab === 'products' && <Products adminKey={adminKey} />}
+        {tab === 'appearance' && <Appearance adminKey={adminKey} />}
+      </main>
+    </div>
+  );
+}
+
+/* ---------------- SHARED ---------------- */
+function H({ children }: { children: React.ReactNode }) {
+  return <h2 style={{ fontFamily: DISPLAY, fontSize: 30, letterSpacing: 0, color: T.white, margin: '0 0 18px', textTransform: 'uppercase' }}>{children}</h2>;
+}
+function Sub({ children }: { children: React.ReactNode }) {
+  return <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 11.5, letterSpacing: 2.2, color: T.ice, margin: '28px 0 10px', textTransform: 'uppercase' }}>{children}</p>;
+}
+function Badge({ on, yes, no }: { on: boolean; yes: string; no: string }) {
+  return (
+    <span style={{ display: 'inline-block', padding: '4px 11px', borderRadius: 20, fontFamily: HEAD, fontWeight: 600, fontSize: 11, letterSpacing: 0.2, ...(on ? { background: 'rgba(61,220,132,0.12)', border: '1px solid rgba(61,220,132,0.4)', color: '#3ddc84' } : { background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.14)', color: T.dim }) }}>{on ? yes : no}</span>
+  );
+}
+function Err({ msg, retry }: { msg: string; retry: () => void }) {
+  return (
+    <div style={{ border: `1px solid ${T.red}`, background: 'rgba(194,91,110,0.1)', borderRadius: 14, padding: 16, marginBottom: 16 }}>
+      <p style={{ color: T.redBright, fontSize: 13.5, margin: '0 0 10px' }}>{msg}</p>
+      <button onClick={retry} style={{ background: T.red, border: 'none', borderRadius: 20, color: '#fff', fontFamily: HEAD, fontWeight: 600, fontSize: 12.5, padding: '8px 18px', cursor: 'pointer' }}>Retry</button>
+    </div>
+  );
+}
+const Loading = () => <p style={{ color: T.dim, fontSize: 14 }}>Loading…</p>;
+const LBL: React.CSSProperties = { display: 'block', fontFamily: HEAD, fontWeight: 600, fontSize: 11, letterSpacing: 1.8, color: T.dim, marginBottom: 7, textTransform: 'uppercase' };
+const INP: React.CSSProperties = { width: '100%', background: T.deep, border: `1px solid ${T.line}`, borderRadius: 12, color: T.white, fontFamily: BODY, fontSize: 15.5, padding: '13px 14px', outline: 'none', boxSizing: 'border-box' };
+const BTN: React.CSSProperties = { background: CHROME_BG, border: 'none', borderRadius: 999, color: '#fff', fontFamily: HEAD, fontWeight: 700, fontSize: 13.5, letterSpacing: 0.6, padding: '13px 28px', cursor: 'pointer', textTransform: 'uppercase', boxShadow: '0 8px 20px rgba(17,64,240,.4)' };
+const GHOST: React.CSSProperties = { background: GLASS_BG, border: `1px solid ${T.line}`, borderRadius: 999, color: '#fff', fontFamily: HEAD, fontWeight: 700, fontSize: 11.5, letterSpacing: 0.8, padding: '9px 16px', cursor: 'pointer', textTransform: 'uppercase', boxShadow: 'inset 0 1px 0 rgba(255,255,255,.12)' };
+
+function toLocalInput(iso?: string | null) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* ---------------- EVENTS ---------------- */
+/* ---------- inline orders list shown inside the event editor ---------- */
+function EventOrders({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [q, setQ] = useState('');
+  const [err, setErr] = useState('');
+  const [open, setOpen] = useState(true);
+
+  const load = useCallback(() => {
+    setErr(''); setRows(null);
+    adminApi(adminKey, 'list_orders', { eventId }).then((d) => setRows(d.orders)).catch((e) => setErr(e.message));
+  }, [adminKey, eventId]);
+  useEffect(load, [load]);
+
+  const needle = q.trim().toLowerCase();
+  const filtered = rows ? (needle ? rows.filter((r) => `${r.buyer} ${r.email} ${r.phone} ${r.shortId}`.toLowerCase().includes(needle)) : rows) : [];
+  const revenue = rows ? rows.reduce((a, r) => a + Number(r.total || 0), 0) : 0;
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 12 }}>
+        <span style={{ fontFamily: HEAD, fontWeight: 900, fontSize: 13, letterSpacing: 4, textTransform: 'uppercase', color: T.chrome }}>
+          Orders {rows ? `(${rows.length})` : ''}
+        </span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={GHOST} onClick={load}>REFRESH</button>
+          <button style={GHOST} onClick={() => setOpen((v) => !v)}>{open ? 'HIDE' : 'SHOW'}</button>
+        </div>
+      </div>
+
+      {open && (
+        <>
+          {err && <Err msg={err} retry={load} />}
+          {!rows && !err && <Loading />}
+          {rows && (
+            <>
+              <p style={{ color: T.dim, fontSize: 13, margin: '0 0 12px', letterSpacing: 1 }}>
+                {rows.length} order{rows.length === 1 ? '' : 's'} · {money(revenue)} collected
+              </p>
+              {rows.length > 0 && (
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="SEARCH NAME, PHONE, EMAIL, OR ORDER #"
+                  style={{ ...INP, maxWidth: 460, letterSpacing: 1.5, marginBottom: 14 }} />
+              )}
+              {filtered.length === 0 && <p style={{ color: T.dim, fontSize: 13.5 }}>{rows.length === 0 ? 'No orders yet.' : 'No matches.'}</p>}
+              {filtered.map((r) => (
+                <div key={r.id} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 12, padding: '13px 16px', marginBottom: 9, maxWidth: 640 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                    <div>
+                      <p style={{ color: T.white, fontWeight: 600, fontSize: 14, margin: '0 0 2px' }}>
+                        {r.buyer} <span style={{ color: T.dim, fontWeight: 400, fontSize: 12.5 }}>· #{r.shortId} · {money(r.total)}</span>
+                      </p>
+                      <p style={{ color: T.dim, fontSize: 12.5, margin: 0, lineHeight: 1.7 }}>
+                        {r.phone ? `${r.phone} · ` : ''}{r.email}<br />
+                        {r.tickets} ticket{r.tickets === 1 ? '' : 's'} · {r.checkedIn} in · {new Date(r.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      </p>
+                      {r.deliveryError && <p style={{ color: T.redBright, fontSize: 12, margin: '4px 0 0' }}>Delivery issue: {r.deliveryError}</p>}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <Badge on={r.emailSent} yes="EMAILED" no="NO EMAIL" />
+                      {r.phone ? <Badge on={r.smsSent} yes="TEXTED" no="NO SMS" /> : null}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function Events({ adminKey, events, eventId, setEventId, refresh }: any) {
+  const [detail, setDetail] = useState<any>(null);
+  const [types, setTypes] = useState<any[]>([]);
+  const [products, setProducts] = useState<any[]>([]);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    adminApi(adminKey, 'list_products', {}).then((r) => setProducts(r.products || [])).catch(() => {});
+  }, [adminKey]);
+
+  const loadDetail = useCallback(() => {
+    if (!eventId) return;
+    adminApi(adminKey, 'get_event', { eventId })
+      .then((d) => {
+        setDetail({ ...d.event });
+        setTypes(d.ticketTypes);
+        fetch(`${BACKEND}/plink?hidden=${eventId}`).then((r) => r.json())
+          .then((h) => { if (Array.isArray(h.hidden)) setTypes((prev) => prev.map((t) => ({ ...t, hidden: h.hidden.includes(t.id) }))); })
+          .catch(() => {});
+      })
+      .catch((e) => setErr(e.message));
+  }, [adminKey, eventId]);
+  useEffect(() => { setDetail(null); loadDetail(); }, [loadDetail]);
+
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 3500); };
+
+  /* --- create --- */
+  const [nw, setNw] = useState({ name: '', date: '', location: '', description: '' });
+  const [creating, setCreating] = useState(false);
+  const create = async () => {
+    setCreating(true); setErr('');
+    try {
+      const d = await adminApi(adminKey, 'create_event', {
+        name: nw.name, location: nw.location, description: nw.description,
+        date: nw.date ? new Date(nw.date).toISOString() : null,
+      });
+      setNw({ name: '', date: '', location: '', description: '' });
+      refresh(); setEventId(d.event.id);
+      flash(`"${d.event.name}" created — now add a ticket type below so it can sell.`);
+    } catch (e: any) { setErr(e.message); }
+    finally { setCreating(false); }
+  };
+
+  /* --- save edits --- */
+  const [saving, setSaving] = useState(false);
+  const saveUpsells = async () => {
+    setSaving(true); setErr('');
+    try {
+      await adminApi(adminKey, 'update_event', {
+        eventId,
+        upsell_bump_enabled: !!detail.upsell_bump_enabled,
+        upsell_bump_trigger_qty: Number(detail.upsell_bump_trigger_qty || 2),
+        upsell_bump_add_qty: Number(detail.upsell_bump_add_qty || 1),
+        upsell_bump_discount: Number(detail.upsell_bump_discount || 0),
+        upsell_addon_enabled: !!detail.upsell_addon_enabled,
+        upsell_addon_ticket_type_id: detail.upsell_addon_ticket_type_id || '',
+        upsell_addon_pitch: detail.upsell_addon_pitch || '',
+        button_color: detail.button_color || '',
+        accent_color: detail.accent_color || '',
+      });
+      refresh(); flash('Saved ✓');
+    } catch (e: any) { setErr(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      let lat: number | undefined, lon: number | undefined;
+      try {
+        const g = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(detail.location)}`).then((r) => r.json());
+        if (g?.[0]) { lat = +g[0].lat; lon = +g[0].lon; }
+      } catch { /* geocode is best-effort */ }
+      await adminApi(adminKey, 'update_event', {
+        eventId,
+        name: detail.name, location: detail.location,
+        description: detail.description || '',
+        date: detail.date ? new Date(detail.date).toISOString() : undefined,
+        end_date: detail.end_date ? new Date(detail.end_date).toISOString() : '',
+        age_restriction: detail.age_restriction || '',
+        event_mode: detail.event_mode || 'ticketed',
+        drop_at: detail.drop_at ? new Date(detail.drop_at).toISOString() : '',
+        drop_headline: detail.drop_headline || '',
+        drop_auto_publish: detail.drop_auto_publish !== false,
+        max_per_order: Number(detail.max_per_order || 10),
+        hide_venue: !!detail.hide_venue,
+        hidden_from_home: !!detail.hidden_from_home,
+        upsell_product_id: detail.upsell_product_id || '',
+        downsell_product_id: detail.downsell_product_id || '',
+        video_url: detail.video_url || '',
+        faqs: Array.isArray(detail.faqs) ? detail.faqs : [],
+        area_label: detail.area_label || '',
+        latitude: lat, longitude: lon,
+      });
+      refresh(); flash('Event saved ✓');
+    } catch (e: any) { setErr(e.message); }
+    finally { setSaving(false); }
+  };
+
+  /* --- ticket types --- */
+  const [ttNew, setTtNew] = useState({ name: 'General Admission', price: '25', quantity: '100' });
+  const addType = async () => {
+    setErr('');
+    try {
+      await adminApi(adminKey, 'create_ticket_type', { eventId, ...ttNew });
+      setTtNew({ name: '', price: '', quantity: '' });
+      loadDetail(); flash('Ticket type added ✓');
+    } catch (e: any) { setErr(e.message); }
+  };
+  const saveType = async (t: any) => {
+    setErr('');
+    try {
+      await adminApi(adminKey, 'update_ticket_type', { ticketTypeId: t.id, name: t.name, price: t.price, quantity: t.quantity });
+      loadDetail(); flash('Ticket type saved ✓');
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  /* --- flyer --- */
+  const [uploading, setUploading] = useState(false);
+  const onFlyer = (file: File | null) => {
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { setErr('Flyer must be under 15MB'); return; }
+    setUploading(true); setErr('');
+    // OPTIMIZE BEFORE UPLOAD: resize to max 1400px wide + re-encode as JPEG q0.82.
+    // A 6MB phone photo becomes ~200-400KB — fans on slow internet load it 15-20x faster.
+    const img = new Image();
+    const objUrl = URL.createObjectURL(file);
+    img.onload = async () => {
+      try {
+        const MAXW = 1400;
+        const scale = Math.min(1, MAXW / img.naturalWidth);
+        const w = Math.round(img.naturalWidth * scale);
+        const h = Math.round(img.naturalHeight * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        URL.revokeObjectURL(objUrl);
+        const d = await adminApi(adminKey, 'upload_flyer', {
+          eventId, contentType: 'image/jpeg',
+          fileBase64: dataUrl.split(',')[1],
+        });
+        setDetail((p: any) => ({ ...p, image_url: d.imageUrl }));
+        refresh(); flash('Flyer optimized + uploaded ✓ — the event page updates instantly.');
+      } catch (e: any) { setErr(e.message); }
+      finally { setUploading(false); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(objUrl); setErr('Could not read that image'); setUploading(false); };
+    img.src = objUrl;
+  };
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [uploadingMusic, setUploadingMusic] = useState(false);
+  const onAsset = (file: File | null, action: string, field: string, urlKey: string, maxMB: number, setBusy: (b: boolean) => void) => {
+    if (!file) return;
+    if (file.size > maxMB * 1024 * 1024) { setErr(`File must be under ${maxMB}MB`); return; }
+    setBusy(true); setErr('');
+    const rd = new FileReader();
+    rd.onload = async () => {
+      try {
+        const d = await adminApi(adminKey, action, { eventId, contentType: file.type, fileBase64: String(rd.result).split(',')[1] });
+        setDetail((p: any) => ({ ...p, [field]: d[urlKey] }));
+        refresh(); flash('Uploaded ✓');
+      } catch (e: any) { setErr(e.message); }
+      finally { setBusy(false); }
+    };
+    rd.onerror = () => { setErr('Could not read that file'); setBusy(false); };
+    rd.readAsDataURL(file);
+  };
+  const removeAsset = async (action: string, field: string) => {
+    setErr('');
+    try { await adminApi(adminKey, action, { eventId }); setDetail((p: any) => ({ ...p, [field]: null })); refresh(); flash('Removed'); }
+    catch (e: any) { setErr(e.message); }
+  };
+
+  const removeFlyer = async () => {
+    setErr('');
+    try {
+      await adminApi(adminKey, 'remove_flyer', { eventId });
+      setDetail((p: any) => ({ ...p, image_url: null }));
+      refresh(); flash('Flyer removed');
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  const pageLink = typeof window !== 'undefined' && detail ? `${window.location.origin}/e?id=${detail.id}` : '';
+
+  return (
+    <>
+      <H>Events</H>
+      {msg && <p style={{ color: T.chrome, fontSize: 13.5, margin: '0 0 14px' }}>{msg}</p>}
+      {err && <p style={{ color: T.redBright, fontSize: 13.5, margin: '0 0 14px' }}>{err}</p>}
+
+      {/* create */}
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, padding: 20, marginBottom: 26, maxWidth: 640 }}>
+        <Sub>Create a new event</Sub>
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div><label style={LBL}>Event name</label>
+            <input style={INP} value={nw.name} onChange={(e) => setNw({ ...nw, name: e.target.value })} placeholder="Desenfocado KC" /></div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div><label style={LBL}>Date &amp; time</label>
+              <input style={INP} type="datetime-local" value={nw.date} onChange={(e) => setNw({ ...nw, date: e.target.value })} /></div>
+            <div><label style={LBL}>Venue / location</label>
+              <input style={INP} value={nw.location} onChange={(e) => setNw({ ...nw, location: e.target.value })} placeholder="The Truman, Kansas City, MO" /></div>
+          </div>
+          <div><label style={LBL}>Description (one line per paragraph)</label>
+            <textarea style={{ ...INP, minHeight: 90, resize: 'vertical' }} value={nw.description} onChange={(e) => setNw({ ...nw, description: e.target.value })} placeholder={'Perreo Electrico takes over KC\n21+ event'} /></div>
+        </div>
+        <button style={{ ...BTN, marginTop: 16, opacity: creating ? 0.5 : 1 }} disabled={creating} onClick={create}>
+          {creating ? 'CREATING…' : 'CREATE EVENT'}
+        </button>
+      </div>
+
+      {/* edit selected */}
+      {!detail ? <Loading /> : (
+        <div style={{ background: T.card, border: `1px solid ${T.line}`, padding: 20, maxWidth: 640 }}>
+          <Sub>Editing: {detail.name}</Sub>
+
+          {pageLink && (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '0 0 18px' }}>
+              <code style={{ color: T.chrome, fontSize: 12.5, background: 'rgba(0,0,0,0.6)', padding: '8px 12px', border: `1px solid ${T.line}` }}>{pageLink}</code>
+              <button style={GHOST} onClick={() => { navigator.clipboard?.writeText(pageLink); flash('Link copied ✓'); }}>COPY LINK</button>
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gap: 12 }}>
+            <div><label style={LBL}>Event name</label>
+              <input style={INP} value={detail.name || ''} onChange={(e) => setDetail({ ...detail, name: e.target.value })} /></div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div><label style={LBL}>Starts</label>
+                <input style={INP} type="datetime-local" value={toLocalInput(detail.date)} onChange={(e) => setDetail({ ...detail, date: e.target.value })} /></div>
+              <div><label style={LBL}>Ends (optional)</label>
+                <input style={INP} type="datetime-local" value={toLocalInput(detail.end_date)} onChange={(e) => setDetail({ ...detail, end_date: e.target.value })} /></div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div><label style={LBL}>Venue / location</label>
+                <input style={INP} value={detail.location || ''} onChange={(e) => setDetail({ ...detail, location: e.target.value })} /></div>
+              <div><label style={LBL}>Age restriction</label>
+                <select style={INP} value={detail.age_restriction || ''} onChange={(e) => setDetail({ ...detail, age_restriction: e.target.value })}>
+                  <option value="">No restriction</option>
+                  <option value="All ages">All ages</option>
+                  <option value="16+">16+</option>
+                  <option value="18+">18+</option>
+                  <option value="21+">21+</option>
+                </select></div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div><label style={LBL}>Event type</label>
+                <select style={INP} value={detail.event_mode || 'ticketed'} onChange={(e) => setDetail({ ...detail, event_mode: e.target.value })}>
+                  <option value="ticketed">Ticketed (Get Tickets)</option>
+                  <option value="rsvp">Guest list / RSVP (free)</option>
+                  <option value="drop">Drop / teaser (collect phones before sale)</option>
+                  <option value="capture">🎯 Capture (sign up → unlock tickets)</option>
+                </select></div>
+              <div><label style={LBL}>Max tickets per order</label>
+                <input style={INP} type="number" min={1} max={50} value={detail.max_per_order ?? 10} onChange={(e) => setDetail({ ...detail, max_per_order: e.target.value })} /></div>
+            </div>
+            {detail.event_mode === 'capture' && (
+              <div style={{ background: `${T.redBright}12`, border: `1px solid ${T.redBright}55`, borderRadius: 12, padding: 16, marginTop: 4 }}>
+                <p style={{ color: '#fff', fontSize: 14, fontWeight: 700, margin: '0 0 4px' }}>🎯 Capture settings</p>
+                <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 14px', lineHeight: 1.5 }}>Fans must sign up (name + phone + email) before tickets unlock — then they land straight in the cart, info prefilled, one tap from paying. Every signup goes to your Leads list + Blast Center, buyer or not.</p>
+                <label style={LBL}>The hook (why should they sign up?)</label>
+                <input style={{ ...INP, marginBottom: 4 }} value={detail.drop_headline || ''} placeholder="We're giving away VIP tables — sign up to enter 🎁" onChange={(e) => setDetail({ ...detail, drop_headline: e.target.value })} />
+                <p style={{ color: T.dim, fontSize: 11.5, margin: '0 0 4px' }}>Ideas: "Sign up for free RSVP" · "Unlock presale pricing" · "VIP giveaway — enter now"</p>
+                <CaptureRedirect adminKey={adminKey} eventId={detail.id} />
+              </div>
+            )}
+            {detail.event_mode === 'drop' && (
+              <div style={{ background: `${T.redBright}12`, border: `1px solid ${T.redBright}55`, borderRadius: 12, padding: 16, marginTop: 4 }}>
+                <p style={{ color: '#fff', fontSize: 14, fontWeight: 700, margin: '0 0 4px' }}>🔒 Drop / teaser settings</p>
+                <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 14px', lineHeight: 1.5 }}>Fans see a countdown + phone signup instead of tickets. When the drop time hits, it can auto-flip to selling — and you can blast the list from the Dashboard tab.</p>
+                <label style={LBL}>Tickets go live at</label>
+                <input style={{ ...INP, marginBottom: 12 }} type="datetime-local" value={toLocalInput(detail.drop_at)} onChange={(e) => setDetail({ ...detail, drop_at: e.target.value })} />
+                <label style={LBL}>Teaser line (optional)</label>
+                <input style={{ ...INP, marginBottom: 12 }} value={detail.drop_headline || ''} placeholder="We drop the info to you first. 🔥" onChange={(e) => setDetail({ ...detail, drop_headline: e.target.value })} />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={detail.drop_auto_publish !== false} onChange={(e) => setDetail({ ...detail, drop_auto_publish: e.target.checked })} style={{ width: 18, height: 18 }} />
+                  <span style={{ color: '#fff', fontSize: 13.5 }}>Auto-flip to selling tickets when the drop time hits</span>
+                </label>
+              </div>
+            )}
+            <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, borderRadius: 12, padding: 14, marginTop: 4 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginBottom: detail.hide_venue ? 12 : 0 }}>
+                <input type="checkbox" checked={!!detail.hide_venue} onChange={(e) => setDetail({ ...detail, hide_venue: e.target.checked })} style={{ width: 18, height: 18 }} />
+                <span style={{ color: '#fff', fontSize: 14, fontWeight: 600 }}>Hide exact venue until day of show</span>
+              </label>
+              {detail.hide_venue && (
+                <div>
+                  <label style={LBL}>Shown until reveal (area / hint)</label>
+                  <input style={INP} value={detail.area_label || ''} placeholder="e.g. The Grove · STL" onChange={(e) => setDetail({ ...detail, area_label: e.target.value })} />
+                  <p style={{ color: T.dim, fontSize: 12, margin: '6px 0 0' }}>Buyers see this instead of the address. The real venue auto-reveals on the event date.</p>
+                </div>
+              )}
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, borderRadius: 12, padding: 14, marginTop: 4 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!detail.hidden_from_home} onChange={(e) => setDetail({ ...detail, hidden_from_home: e.target.checked })} style={{ width: 18, height: 18 }} />
+                <span style={{ color: '#fff', fontSize: 14, fontWeight: 600 }}>Hide from public homepage</span>
+              </label>
+              <p style={{ color: T.dim, fontSize: 12, margin: '6px 0 0 28px' }}>Event stays live and buyable via its direct link, but won&apos;t show in the public event list. Good for private / unlisted shows.</p>
+            </div>
+            <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, borderRadius: 12, padding: 14, marginTop: 4 }}>
+              <p style={{ color: '#fff', fontSize: 14, fontWeight: 700, margin: '0 0 4px' }}>💰 One-click offers (after checkout)</p>
+              <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px', lineHeight: 1.5 }}>Right after paying, buyers see the upsell (yes = instant charge on their saved card). If they pass, they see the downsell. Create products in the Products tab.</p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div><label style={LBL}>Upsell</label>
+                  <select style={INP} value={detail.upsell_product_id || ''} onChange={(e) => setDetail({ ...detail, upsell_product_id: e.target.value })}>
+                    <option value="">None</option>
+                    {products.map((p: any) => <option key={p.id} value={p.id}>{p.name} (${Number(p.price).toFixed(2)})</option>)}
+                  </select></div>
+                <div><label style={LBL}>Downsell</label>
+                  <select style={INP} value={detail.downsell_product_id || ''} onChange={(e) => setDetail({ ...detail, downsell_product_id: e.target.value })}>
+                    <option value="">None</option>
+                    {products.map((p: any) => <option key={p.id} value={p.id}>{p.name} (${Number(p.price).toFixed(2)})</option>)}
+                  </select></div>
+              </div>
+            </div>
+            <div>
+              <label style={LBL}>Vibe video (YouTube / Vimeo / .mp4 link)</label>
+              <input style={INP} value={detail.video_url || ''} placeholder="https://youtube.com/watch?v=..." onChange={(e) => setDetail({ ...detail, video_url: e.target.value })} />
+              <p style={{ color: T.dim, fontSize: 12, margin: '6px 0 0' }}>Shows as a tap-to-play preview on the event page — recap footage sells the experience. It only loads when tapped, so it never slows the page.</p>
+            </div>
+            <FaqEditor faqs={Array.isArray(detail.faqs) ? detail.faqs : []} onChange={(f: any[]) => setDetail({ ...detail, faqs: f })} />
+            <div><label style={LBL}>Description</label>
+              <textarea style={{ ...INP, minHeight: 110, resize: 'vertical' }} value={detail.description || ''} onChange={(e) => setDetail({ ...detail, description: e.target.value })} /></div>
+          </div>
+          <button style={{ ...BTN, marginTop: 16, opacity: saving ? 0.5 : 1 }} disabled={saving} onClick={save}>
+            {saving ? 'SAVING…' : 'SAVE EVENT'}
+          </button>
+
+          <DeleteEvent adminKey={adminKey} eventId={eventId} name={detail.name} onDeleted={() => { setEventId(''); refresh(); }} />
+
+          {/* flyer */}
+          <Sub>Flyer</Sub>
+          {detail.image_url
+            ? <img src={detail.image_url} alt="flyer" style={{ maxWidth: 220, display: 'block', border: `1px solid ${T.line}`, marginBottom: 12 }} />
+            : <p style={{ color: T.dim, fontSize: 13, margin: '0 0 12px' }}>No flyer yet — the page shows a generated placeholder until you add one.</p>}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <label style={{ ...GHOST, display: 'inline-block' }}>
+              {uploading ? 'UPLOADING…' : detail.image_url ? 'REPLACE FLYER' : 'UPLOAD FLYER'}
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: 'none' }}
+                disabled={uploading} onChange={(e) => onFlyer(e.target.files?.[0] || null)} />
+            </label>
+            {detail.image_url && <button style={GHOST} onClick={removeFlyer}>REMOVE</button>}
+          </div>
+          <p style={{ color: '#6a6060', fontSize: 11.5, margin: '10px 0 0' }}>
+            The event page background auto-tints to match the flyer&apos;s colors.
+          </p>
+
+          {/* logo */}
+          <Sub>Logo (shows on the event page)</Sub>
+          {detail.logo_url
+            ? <img src={detail.logo_url} alt="logo" style={{ maxHeight: 46, background: '#1a1a1a', padding: 8, borderRadius: 6, marginBottom: 10, display: 'block' }} />
+            : <p style={{ color: T.dim, fontSize: 13, margin: '0 0 10px' }}>No logo yet — the page shows the Goza wordmark.</p>}
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ ...GHOST, display: 'inline-block' }}>
+              {uploadingLogo ? 'UPLOADING…' : detail.logo_url ? 'REPLACE LOGO' : 'UPLOAD LOGO'}
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" style={{ display: 'none' }}
+                disabled={uploadingLogo} onChange={(e) => onAsset(e.target.files?.[0] || null, 'upload_logo', 'logo_url', 'logoUrl', 4, setUploadingLogo)} />
+            </label>
+            {detail.logo_url && <button style={GHOST} onClick={() => removeAsset('remove_logo', 'logo_url')}>REMOVE</button>}
+          </div>
+
+          {/* music */}
+          <Sub>Event music (press-play on the page)</Sub>
+          {detail.music_url
+            ? <audio src={detail.music_url} controls style={{ width: '100%', maxWidth: 320, marginBottom: 10 }} />
+            : <p style={{ color: T.dim, fontSize: 13, margin: '0 0 10px' }}>No track yet — the play button is hidden until you add one.</p>}
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ ...GHOST, display: 'inline-block' }}>
+              {uploadingMusic ? 'UPLOADING…' : detail.music_url ? 'REPLACE TRACK' : 'UPLOAD TRACK'}
+              <input type="file" accept="audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/wav,audio/ogg" style={{ display: 'none' }}
+                disabled={uploadingMusic} onChange={(e) => onAsset(e.target.files?.[0] || null, 'upload_music', 'music_url', 'musicUrl', 12, setUploadingMusic)} />
+            </label>
+            {detail.music_url && <button style={GHOST} onClick={() => removeAsset('remove_music', 'music_url')}>REMOVE</button>}
+          </div>
+          <p style={{ color: '#6a6060', fontSize: 11.5, margin: '10px 0 0' }}>MP3, M4A, or WAV up to 12MB. Loops while they browse.</p>
+
+          {/* upsells */}
+          <Sub>Upsells (shown in the cart)</Sub>
+          <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, padding: 16, marginBottom: 12 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, cursor: 'pointer', fontSize: 14 }}>
+              <input type="checkbox" checked={!!detail.upsell_bump_enabled} onChange={(e) => setDetail({ ...detail, upsell_bump_enabled: e.target.checked })} style={{ width: 18, height: 18, accentColor: T.red }} />
+              <span style={{ color: T.white, fontWeight: 600 }}>Group deal — buy more, save on the batch</span>
+            </label>
+            {detail.upsell_bump_enabled && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, paddingLeft: 28 }}>
+                <div><label style={LBL}>Show at qty</label><input style={INP} type="number" min="1" value={detail.upsell_bump_trigger_qty ?? 2} onChange={(e) => setDetail({ ...detail, upsell_bump_trigger_qty: e.target.value })} /></div>
+                <div><label style={LBL}>Add how many</label><input style={INP} type="number" min="1" value={detail.upsell_bump_add_qty ?? 1} onChange={(e) => setDetail({ ...detail, upsell_bump_add_qty: e.target.value })} /></div>
+                <div><label style={LBL}>$ off batch</label><input style={INP} type="number" min="0" value={detail.upsell_bump_discount ?? 10} onChange={(e) => setDetail({ ...detail, upsell_bump_discount: e.target.value })} /></div>
+              </div>
+            )}
+          </div>
+          <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, padding: 16, marginBottom: 12 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, cursor: 'pointer', fontSize: 14 }}>
+              <input type="checkbox" checked={!!detail.upsell_addon_enabled} onChange={(e) => setDetail({ ...detail, upsell_addon_enabled: e.target.checked })} style={{ width: 18, height: 18, accentColor: T.red }} />
+              <span style={{ color: T.white, fontWeight: 600 }}>Add-on — pitch another ticket type</span>
+            </label>
+            {detail.upsell_addon_enabled && (
+              <div style={{ display: 'grid', gap: 10, paddingLeft: 28 }}>
+                <div><label style={LBL}>Which ticket type</label>
+                  <select style={INP} value={detail.upsell_addon_ticket_type_id || ''} onChange={(e) => setDetail({ ...detail, upsell_addon_ticket_type_id: e.target.value })}>
+                    <option value="">Choose…</option>
+                    {types.map((t) => <option key={t.id} value={t.id}>{t.name} · ${t.price}</option>)}
+                  </select></div>
+                <div><label style={LBL}>Pitch line</label><input style={INP} value={detail.upsell_addon_pitch || ''} onChange={(e) => setDetail({ ...detail, upsell_addon_pitch: e.target.value })} placeholder="Make it a night — add a VIP table" /></div>
+              </div>
+            )}
+          </div>
+
+          {/* per-event button color */}
+          <Sub>Button color</Sub>
+          <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, padding: 16, marginBottom: 12 }}>
+            <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px', lineHeight: 1.5 }}>
+              Sets the Get Tickets / Pay buttons for this event. Leave blank to use the site default.
+            </p>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+              {['#c25b6e', '#7c3aed', '#2563eb', '#e11d48', '#059669', '#ea580c', '#db2777', '#0891b2'].map((c) => (
+                <button key={c} onClick={() => setDetail({ ...detail, button_color: c })}
+                  aria-label={c}
+                  style={{ width: 34, height: 34, borderRadius: '50%', background: c, border: (detail.button_color || '').toLowerCase() === c ? '3px solid #fff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer' }} />
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <input type="color" value={detail.button_color || '#c25b6e'} onChange={(e) => setDetail({ ...detail, button_color: e.target.value })}
+                style={{ width: 46, height: 40, background: 'none', border: `1px solid ${T.line}`, cursor: 'pointer', padding: 2 }} />
+              <input style={{ ...INP, maxWidth: 140, fontFamily: 'monospace' }} value={detail.button_color || ''} placeholder="#c25b6e"
+                onChange={(e) => setDetail({ ...detail, button_color: e.target.value })} />
+              {detail.button_color && (
+                <button style={GHOST} onClick={() => setDetail({ ...detail, button_color: '' })}>USE SITE DEFAULT</button>
+              )}
+              <span style={{ display: 'inline-flex', alignItems: 'center', background: detail.button_color || '#c25b6e', color: '#fff', fontSize: 12.5, fontWeight: 700, padding: '9px 16px', borderRadius: 20 }}>Preview</span>
+            </div>
+          </div>
+
+          {/* per-event accent color */}
+          <Sub>Accent color</Sub>
+          <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, borderRadius: 12, padding: 16, marginBottom: 12 }}>
+            <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px', lineHeight: 1.5 }}>
+              The date text and highlights for this event. Leave blank to use the site default.
+            </p>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+              {['#c25b6e', '#831100', '#7c3aed', '#2563eb', '#e11d48', '#059669', '#ea580c', '#db2777', '#0891b2'].map((c) => (
+                <button key={c} onClick={() => setDetail({ ...detail, accent_color: c })}
+                  aria-label={c}
+                  style={{ width: 34, height: 34, borderRadius: '50%', background: c, border: (detail.accent_color || '').toLowerCase() === c ? '3px solid #fff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer' }} />
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <input type="color" value={detail.accent_color || '#c25b6e'} onChange={(e) => setDetail({ ...detail, accent_color: e.target.value })}
+                style={{ width: 46, height: 40, background: 'none', border: `1px solid ${T.line}`, borderRadius: 10, cursor: 'pointer', padding: 2 }} />
+              <input style={{ ...INP, maxWidth: 140, fontFamily: 'monospace' }} value={detail.accent_color || ''} placeholder="#c25b6e"
+                onChange={(e) => setDetail({ ...detail, accent_color: e.target.value })} />
+              {detail.accent_color && (
+                <button style={GHOST} onClick={() => setDetail({ ...detail, accent_color: '' })}>USE SITE DEFAULT</button>
+              )}
+              <span style={{ display: 'inline-flex', alignItems: 'center', color: detail.accent_color || '#c25b6e', fontSize: 12.5, fontWeight: 700, letterSpacing: 1.5 }}>SAT, AUG 22 · 8PM</span>
+            </div>
+          </div>
+
+          <button style={{ ...BTN, opacity: saving ? 0.5 : 1 }} disabled={saving} onClick={saveUpsells}>
+            {saving ? 'SAVING…' : 'SAVE UPSELLS + MEDIA'}
+          </button>
+
+          {/* ticket types */}
+          <Sub>Ticket types</Sub>
+          {types.length === 0 && <p style={{ color: T.redBright, fontSize: 13, margin: '0 0 12px' }}>No ticket types yet — the page can&apos;t sell until you add one.</p>}
+          {types.map((t, i) => (
+            <div key={t.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 8, alignItems: 'end', marginBottom: 10 }}>
+              <div>{i === 0 && <label style={LBL}>Name</label>}
+                <input style={INP} value={t.name} onChange={(e) => setTypes(types.map((x) => x.id === t.id ? { ...x, name: e.target.value } : x))} /></div>
+              <div>{i === 0 && <label style={LBL}>Price $</label>}
+                <input style={INP} type="number" step="1" min="0" value={t.price} onChange={(e) => setTypes(types.map((x) => x.id === t.id ? { ...x, price: e.target.value } : x))} /></div>
+              <div>{i === 0 && <label style={LBL}>Qty</label>}
+                <input style={INP} type="number" step="1" min={t.sold || 0} value={t.quantity} onChange={(e) => setTypes(types.map((x) => x.id === t.id ? { ...x, quantity: e.target.value } : x))} /></div>
+              <button style={{ ...GHOST, height: 42 }} onClick={() => saveType(t)}>SAVE</button>
+              <div style={{ gridColumn: '1 / -1', marginTop: -4 }}>
+                <button onClick={async () => {
+                  const next = !t.hidden;
+                  setTypes(types.map((x) => x.id === t.id ? { ...x, hidden: next } : x));
+                  try { await fetch(`${BACKEND}/plink`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ action: 'set_tier_hidden', ticketTypeId: t.id, hidden: next }) }); } catch {}
+                }}
+                  style={{ background: 'none', border: 'none', color: t.hidden ? '#f0b64b' : T.dim, fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0 }}>
+                  {t.hidden ? '🙈 Hidden from event page — tap to show' : '👁 Visible — tap to hide from event page'}
+                </button>
+              </div>
+            </div>
+          ))}
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 8, alignItems: 'end', marginTop: 6, paddingTop: 12, borderTop: `1px solid ${T.line}` }}>
+            <div><label style={LBL}>New type</label>
+              <input style={INP} placeholder="VIP" value={ttNew.name} onChange={(e) => setTtNew({ ...ttNew, name: e.target.value })} /></div>
+            <div><label style={LBL}>Price $</label>
+              <input style={INP} type="number" placeholder="40" value={ttNew.price} onChange={(e) => setTtNew({ ...ttNew, price: e.target.value })} /></div>
+            <div><label style={LBL}>Qty</label>
+              <input style={INP} type="number" placeholder="50" value={ttNew.quantity} onChange={(e) => setTtNew({ ...ttNew, quantity: e.target.value })} /></div>
+            <button style={{ ...GHOST, height: 42 }} onClick={addType}>ADD</button>
+          </div>
+
+          {/* orders for this event, right here in the editor */}
+          <EventOrders adminKey={adminKey} eventId={eventId} />
+        </div>
+      )}
+
+      {/* all events */}
+      <Sub>All events</Sub>
+      {events.map((e: any) => (
+        <button key={e.id} onClick={() => setEventId(e.id)}
+          style={{ display: 'flex', width: '100%', maxWidth: 640, justifyContent: 'space-between', alignItems: 'center', textAlign: 'left', background: e.id === eventId ? 'rgba(194,91,110,0.14)' : T.card, border: `1px solid ${e.id === eventId ? 'rgba(194,91,110,0.4)' : T.line}`, borderRadius: 12, padding: '14px 16px', marginBottom: 8, cursor: 'pointer' }}>
+          <span>
+            <span style={{ color: T.white, fontWeight: 600, fontSize: 14.5, display: 'block' }}>{e.name}</span>
+            <span style={{ color: T.dim, fontSize: 12.5 }}>{fmtDate(e.date)} · {e.location}</span>
+          </span>
+          <span style={{ color: T.dim, fontSize: 12.5, whiteSpace: 'nowrap', marginLeft: 12 }}>{e.totals.sold}/{e.totals.qty} sold{(e.notifySignups ?? 0) > 0 ? ` · 🔔 ${e.notifySignups}` : ''}</span>
+        </button>
+      ))}
+    </>
+  );
+}
+
+/* ---------------- DASHBOARD ---------------- */
+function Dashboard({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [d, setD] = useState<any>(null);
+  const [trueStats, setTrueStats] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const load = useCallback(() => {
+    setErr(''); setD(null);
+    adminApi(adminKey, 'stats', { eventId }).then(setD).catch((e) => setErr(e.message));
+    // true view counts (the admin stats call caps at 1000 rows)
+    fetch(`${BACKEND}/stats`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ eventId }) })
+      .then((r) => r.json()).then((t) => { if (!t.error) setTrueStats(t); }).catch(() => {});
+  }, [adminKey, eventId]);
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+
+  if (err) return <><H>Dashboard</H><Err msg={err} retry={load} /></>;
+  if (!d) return <><H>Dashboard</H><Loading /></>;
+
+  const trueViews = trueStats?.views ?? d.views ?? 0;
+  const trueUnique = trueStats?.unique ?? d.uniqueViews ?? 0;
+  const cards = [
+    { label: 'Gross Sales', value: money(d.gross), hot: true, meaning: 'before fees come out' },
+    { label: 'Your Payout', value: money(d.payout), hot: true, meaning: 'what lands in the bank' },
+    { label: 'Tickets Sold', value: String(d.ticketsSold), meaning: `${d.checkedIn} scanned in` },
+    { label: 'Page Views', value: trueViews.toLocaleString() },
+    { label: 'Unique Views', value: trueUnique.toLocaleString() },
+    ...(trueStats?.creditRedeemed > 0
+      ? [{ label: 'Paid w/ credit', value: money(trueStats.creditRedeemed), meaning: `${trueStats.creditOrders} order${trueStats.creditOrders === 1 ? '' : 's'} · not new money` }]
+      : []),
+    { label: 'Checked In', value: `${d.checkedIn} / ${d.ticketsSold}` },
+    { label: '🔔 Drop Signups', value: String(d.notifySignups ?? 0) },
+  ];
+  const tiers: any[] = trueStats?.tiers || [];
+  // conversion rate: tickets sold per unique view
+  const conv = trueUnique > 0 ? Math.round((d.ticketsSold / trueUnique) * 100) : null;
+  const series: any[] = d.dailySeries || [];
+  const maxTickets = Math.max(1, ...series.map((s) => s.tickets));
+  const maxViews = Math.max(1, ...series.map((s) => s.views));
+  return (
+    <>
+      <H>Dashboard</H>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
+        {cards.map((c) => (
+          <div key={c.label} style={{ background: c.hot ? T.blue : PANEL_BG, border: `1px solid ${c.hot ? T.blue : T.line}`, borderRadius: 16, padding: '18px 16px 15px', boxShadow: '0 10px 30px rgba(0,0,0,.4)' }}>
+            <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2.4, textTransform: 'uppercase', color: c.hot ? '#C9D6FF' : T.dim, margin: '0 0 8px' }}>{c.label}</p>
+            <p style={{ fontFamily: DISPLAY, fontSize: 30, lineHeight: 1.05, color: T.white, margin: 0 }}>{c.value}</p>
+            {c.meaning && <p style={{ fontFamily: BODY, fontSize: 12.5, color: c.hot ? '#C9D6FF' : T.dim, margin: '5px 0 0' }}>{c.meaning}</p>}
+          </div>
+        ))}
+      </div>
+
+      {conv != null && (
+        <div style={{ background: 'rgba(17,64,240,0.12)', border: `1px solid rgba(17,64,240,0.45)`, borderRadius: 12, padding: '12px 16px', marginBottom: 24, maxWidth: 520, fontSize: 13.5, color: T.text }}>
+          <strong style={{ color: '#fff' }}>{conv}%</strong> of unique visitors bought a ticket ({d.ticketsSold} sold / {trueUnique.toLocaleString()} unique views).
+        </div>
+      )}
+
+        {tiers.length > 0 && (
+          <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 14 }}>
+            <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 12px' }}>🎟 Sales by ticket type</p>
+            {tiers.map((t) => {
+              const pct = t.capacity > 0 ? Math.min(100, Math.round((t.sold / t.capacity) * 100)) : 0;
+              return (
+                <div key={t.id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                    <span style={{ color: '#fff', fontSize: 13.5, fontWeight: 700 }}>
+                      {t.name} · ${Number(t.price).toFixed(0)}{t.hidden ? ' 🙈' : ''}
+                    </span>
+                    <span style={{ color: T.dim, fontSize: 12.5 }}>
+                      <strong style={{ color: '#fff' }}>{t.sold}</strong> sold{t.capacity ? ` / ${t.capacity}` : ''} · {t.remaining} left · ${Number(t.revenue).toFixed(0)}{t.scanned ? ` · ${t.scanned} in` : ''}
+                    </span>
+                  </div>
+                  <div style={{ height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 4, overflow: 'hidden' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: t.remaining === 0 ? '#5fd39a' : T.redBright }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+
+      {(d.otoRevenue ?? 0) > 0 && (
+        <div style={{ background: 'rgba(61,220,132,0.08)', border: '1px solid rgba(61,220,132,0.3)', borderRadius: 12, padding: '12px 16px', marginBottom: 24, maxWidth: 520, fontSize: 13.5, color: T.text }}>
+          💰 One-click offers: <strong style={{ color: '#fff' }}>{money(d.otoRevenue)}</strong> extra revenue · {d.upsellTaken} took the upsell · {d.downsellTaken} took the downsell
+        </div>
+      )}
+
+      <Sub>Last {d.rangeDays || 14} days</Sub>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14, padding: '20px 16px 12px', marginBottom: 26, maxWidth: 720, overflowX: 'auto' }}>
+        <div style={{ display: 'flex', gap: 16, marginBottom: 16, fontSize: 12 }}>
+          <span style={{ color: T.redBright }}>■ Tickets sold</span>
+          <span style={{ color: '#6f9fd8' }}>■ Views</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 160, minWidth: series.length * 34 }}>
+          {series.map((s) => {
+            const label = new Date(s.date + 'T12:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+            return (
+              <div key={s.date} style={{ flex: 1, minWidth: 26, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 130, width: '100%', justifyContent: 'center' }}>
+                  <div title={`${s.tickets} tickets`} style={{ width: '42%', height: `${(s.tickets / maxTickets) * 100}%`, minHeight: s.tickets ? 3 : 0, background: T.redBright, borderRadius: '3px 3px 0 0' }} />
+                  <div title={`${s.views} views`} style={{ width: '42%', height: `${(s.views / maxViews) * 100}%`, minHeight: s.views ? 3 : 0, background: '#6f9fd8', borderRadius: '3px 3px 0 0' }} />
+                </div>
+                <span style={{ fontSize: 9.5, color: T.dim, whiteSpace: 'nowrap' }}>{label}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <Sub>Fee breakdown</Sub>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14, padding: 16, marginBottom: 8, fontSize: 13.5, lineHeight: 2, maxWidth: 520 }}>
+        <Row2 l="Face value collected" v={money(d.faceValue)} />
+        <Row2 l="Service fees (yours)" v={money(d.serviceFees)} />
+        <Row2 l="Tax collected" v={money(d.tax)} />
+        <Row2 l="Processing (Stripe's cut)" v={money(d.processingFees)} dim />
+      </div>
+      <Sub>Ticket types</Sub>
+      {d.ticketTypes.map((t: any) => {
+        const pct = t.quantity ? Math.min(100, Math.round((t.sold / t.quantity) * 100)) : 0;
+        return (
+          <div key={t.name} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 12, padding: 16, marginBottom: 10, maxWidth: 520 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ color: T.white, fontWeight: 600, fontSize: 14 }}>{t.name} · {money(t.price)}</span>
+              <span style={{ color: T.dim, fontSize: 13 }}>{t.sold} / {t.quantity}</span>
+            </div>
+            <div style={{ height: 6, background: 'rgba(255,255,255,0.06)' }}>
+              <div style={{ height: '100%', width: `${pct}%`, background: `linear-gradient(90deg, ${T.red}, ${T.redBright})` }} />
+            </div>
+          </div>
+        );
+      })}
+      {d.recentOrders.length > 0 && (
+        <>
+          <Sub>Recent orders</Sub>
+          <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14, maxWidth: 520 }}>
+            {d.recentOrders.map((o: any) => (
+              <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 13.5 }}>
+                <span style={{ color: T.white }}>{o.buyer}</span>
+                <span style={{ color: T.dim }}>{money(o.total)} · {new Date(o.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+function Row2({ l, v, dim }: { l: string; v: string; dim?: boolean }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+      <span style={{ color: dim ? T.dim : T.text }}>{l}</span>
+      <span style={{ color: dim ? T.dim : T.white, fontWeight: 600 }}>{v}</span>
+    </div>
+  );
+}
+
+/* ---------------- ROSTER ---------------- */
+function Roster({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [q, setQ] = useState('');
+  const [err, setErr] = useState('');
+  const [resending, setResending] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const load = useCallback(() => {
+    setErr(''); setRows(null);
+    adminApi(adminKey, 'roster', { eventId }).then((d) => setRows(d.roster)).catch((e) => setErr(e.message));
+  }, [adminKey, eventId]);
+  useEffect(load, [load]);
+
+  const resend = async (orderId: string, buyer: string, currentEmail?: string) => {
+    const to = window.prompt(`Resend tickets for ${buyer}.\nSend to this email (edit it if theirs was wrong):`, currentEmail && currentEmail !== '—' ? currentEmail : '');
+    if (to === null) return; // cancelled
+    setResending(orderId); setNotice('');
+    try {
+      const target = to.trim();
+      await adminApi(adminKey, 'resend', { eventId, orderId, ...(target ? { toEmail: target } : {}) });
+      setNotice(`Tickets re-sent to ${target || buyer} ✓`);
+    }
+    catch (e: any) { setNotice(`Resend failed: ${e.message}`); }
+    finally { setResending(''); }
+  };
+
+  if (err) return <><H>Roster</H><Err msg={err} retry={load} /></>;
+  if (!rows) return <><H>Roster</H><Loading /></>;
+
+  const needle = q.trim().toLowerCase();
+  const filtered = needle ? rows.filter((r) => `${r.buyer} ${r.email} ${r.codeTail}`.toLowerCase().includes(needle)) : rows;
+
+  return (
+    <>
+      <H>Roster</H>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="SEARCH NAME, EMAIL, OR CODE"
+        style={{ ...INP, maxWidth: 420, letterSpacing: 1.5, marginBottom: 16 }} />
+      {notice && <p style={{ color: notice.includes('✓') ? T.chrome : T.redBright, fontSize: 13, margin: '0 0 12px' }}>{notice}</p>}
+      {filtered.length === 0 && <p style={{ color: T.dim, fontSize: 13.5 }}>{rows.length === 0 ? 'No paid tickets yet.' : 'No matches.'}</p>}
+      {filtered.map((r) => (
+        <div key={r.ticketId} style={{ background: T.card, border: `1px solid ${T.line}`, padding: '14px 16px', marginBottom: 10, maxWidth: 640 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <p style={{ color: T.white, fontWeight: 600, fontSize: 14.5, margin: '0 0 2px' }}>{r.buyer}</p>
+              <p style={{ color: T.dim, fontSize: 12.5, margin: 0 }}>{r.email} · code {r.codeTail}</p>
+              {r.deliveryError && <p style={{ color: T.redBright, fontSize: 12, margin: '4px 0 0' }}>Delivery issue: {r.deliveryError}</p>}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Badge on={r.checkedIn} yes="IN" no="NOT IN" />
+              <button onClick={() => resend(r.orderId, r.buyer, (r as any).email)} disabled={resending === r.orderId}
+                style={{ ...GHOST, opacity: resending === r.orderId ? 0.5 : 1 }}>
+                {resending === r.orderId ? 'SENDING…' : 'RESEND'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+      <p style={{ color: T.dim, fontSize: 12, letterSpacing: 1 }}>{filtered.length} ticket{filtered.length === 1 ? '' : 's'} shown</p>
+    </>
+  );
+}
+
+/* ---------------- FEES ---------------- */
+
+
+
+
+/* ---- capture mode: where do signups get redirected? (blank = unlock this page's tickets) ---- */
+function CaptureRedirect({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [val, setVal] = useState('');
+  const [saved, setSaved] = useState('');
+  const [err, setErr] = useState('');
+  useEffect(() => { fetch(`${BACKEND}/plink?capcfg=${eventId}`).then((r) => r.json()).then((d) => setVal(d.redirect || '')).catch(() => {}); }, [eventId]);
+  const save = async () => {
+    setErr(''); setSaved('');
+    try {
+      const r = await fetch(`${BACKEND}/plink`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ action: 'set_capture', eventId, redirect: val.trim() }) }).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      setSaved(val.trim() ? 'Redirect saved ✓' : 'Cleared ✓ signups unlock this page');
+    } catch (e: any) { setErr(e.message); }
+  };
+  return (
+    <div style={{ marginTop: 12 }}>
+      <label style={LBL}>Redirect after signup (optional)</label>
+      <input style={{ ...INP, marginBottom: 6 }} value={val} placeholder="https://your-ticket-link.com (blank = unlock tickets on this page)" onChange={(e) => { setVal(e.target.value); setSaved(''); }} />
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+        <button onClick={save} style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: 'none', borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>Save redirect</button>
+        {saved && <span style={{ color: '#5fd39a', fontSize: 12.5, fontWeight: 700 }}>{saved}</span>}
+        {err && <span style={{ color: '#ff6b6b', fontSize: 12.5 }}>{err}</span>}
+      </div>
+    </div>
+  );
+}
+
+
+
+/* ---- DOOR: search a customer and check them in without a QR ---- */
+
+/* ---------------- BAR MENU: products the bar sells, and who can ring them ----------------
+   These live in their own table. They never appear on an event page or in the box
+   office - only inside the bar screen, for a device holding a valid bar code. */
+
+/* ---------------- STAFF & ACCESS: who can do what, and for how long ---------------- */
+
+/* ---------------- EVENT MODE: cancel or postpone, and how refunds run ----------------
+   Setting a mode is what turns the credit-or-refund choice ON for buyers. A
+   normal show never shows it. */
+function EventMode({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [st, setSt] = useState<any>(null);
+  const [newDate, setNewDate] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const call = async (payload: any) =>
+    fetch(`${BACKEND}/eventmode`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ eventId, ...payload }) }).then((r) => r.json());
+
+  const load = useCallback(async () => { const r = await call({ action: 'status' }); if (r.ok) setSt(r); }, [adminKey, eventId]);
+  useEffect(() => { load(); }, [load]);
+
+  const act = async (action: string, extra: any = {}) => {
+    if (action === 'cancel') {
+      const n = st?.paidOrders ?? 0;
+      const warn = [
+        `CANCEL THIS EVENT?`,
+        ``,
+        `What happens straight away:`,
+        `• ${n} buyer${n === 1 ? '' : 's'} get the credit-or-refund choice on their account`,
+        `• The event stops selling tickets`,
+        `• Refunds are ${st?.refundMode === 'auto' ? 'paid automatically on the next batch' : 'held until you run them'}`,
+        ``,
+        `What does NOT happen:`,
+        `• No money moves yet`,
+        `• No text or email goes out - you send that yourself`,
+        ``,
+        `You can undo this with "Put it back to normal".`,
+      ].join('\n');
+      if (!window.confirm(warn)) return;
+    }
+    if (action === 'postpone') {
+      const n = st?.paidOrders ?? 0;
+      if (!window.confirm(`POSTPONE TO ${newDate}?\n\n• ${n} existing ticket${n === 1 ? '' : 's'} stay valid for the new date\n• Buyers who can't make it can take credit or a refund\n• No money moves yet\n\nYou can undo this.`)) return;
+    }
+    setBusy(true); setMsg('');
+    const r = await call({ action, refundMode: st?.refundMode || 'manual', ...extra });
+    setBusy(false);
+    setMsg(r?.message || r?.error || '');
+    load();
+  };
+
+  const state = st?.state || 'normal';
+  const colour = state === 'cancelled' ? T.bad : state === 'postponed' ? T.warn : T.good;
+
+  return (
+    <div style={{ background: PANEL_BG, border: `1px solid ${T.line}`, borderRadius: 18, padding: 22, marginBottom: 22 }}>
+      <H>Event status</H>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 14px', maxWidth: 560 }}>
+        Cancelling or postponing is what turns the credit-or-refund choice on for buyers. A normal show never shows it.
+      </p>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <span style={{ width: 10, height: 10, borderRadius: '50%', background: colour, display: 'block' }} />
+        <span style={{ color: T.white, fontFamily: HEAD, fontWeight: 700, fontSize: 15, textTransform: 'uppercase' }}>{state}</span>
+        <span style={{ color: T.dim, fontSize: 13 }}>
+          {st?.paidOrders ?? 0} paid order{(st?.paidOrders ?? 0) === 1 ? '' : 's'}
+          {st?.offersChoice ? ' · buyers see the choice' : ' · no choice shown'}
+        </span>
+      </div>
+
+      {state === 'normal' ? (
+        <>
+          {/* cancel stands alone - no date involved */}
+          <div style={{ marginBottom: 16 }}>
+            <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: T.dim, margin: '0 0 8px' }}>Call it off</p>
+            <button onClick={() => act('cancel')} disabled={busy}
+              style={{ ...BTN, background: T.bad, boxShadow: 'none' }}>Cancel event</button>
+            <p style={{ color: T.dim, fontSize: 12.5, margin: '8px 0 0', maxWidth: 520 }}>
+              The show is off. Everyone who paid is offered credit or a refund.
+            </p>
+          </div>
+
+          {/* postpone owns the date field */}
+          <div style={{ borderTop: `1px solid ${T.line2}`, paddingTop: 14, marginBottom: 12 }}>
+            <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: T.dim, margin: '0 0 8px' }}>Move it to a new date</p>
+            <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'center' }}>
+              <input value={newDate} onChange={(e) => setNewDate(e.target.value)} placeholder="2026-11-14 22:00"
+                style={{ ...INP, flex: 1, minWidth: 200, marginBottom: 0 }} />
+              <button onClick={() => act('postpone', { newDate })} disabled={busy || !newDate.trim()}
+                style={{ ...BTN, background: T.warn, color: '#1a1206', boxShadow: 'none', opacity: newDate.trim() ? 1 : 0.5 }}>
+                Postpone
+              </button>
+            </div>
+            <p style={{ color: T.dim, fontSize: 12.5, margin: '8px 0 0', maxWidth: 520 }}>
+              Tickets stay valid for the new date. Anyone who can&apos;t make it can still take credit or a refund.
+            </p>
+          </div>
+        </>
+      ) : (
+        <button onClick={() => act('reinstate')} disabled={busy} style={{ ...GHOST, marginBottom: 12 }}>
+          Put it back to normal
+        </button>
+      )}
+
+      <div style={{ borderTop: `1px solid ${T.line2}`, paddingTop: 14 }}>
+        <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: T.dim, margin: '0 0 8px' }}>Refunds</p>
+        <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+          {(['manual', 'auto'] as const).map((m) => (
+            <button key={m} onClick={() => act('set_mode', { refundMode: m })} disabled={busy}
+              style={{ background: st?.refundMode === m ? T.blue : GLASS_BG, border: `1px solid ${st?.refundMode === m ? T.blue : T.line}`,
+                borderRadius: 999, padding: '11px 18px', color: '#fff', fontFamily: HEAD, fontWeight: 700, fontSize: 12.5, letterSpacing: 0.8, textTransform: 'uppercase', cursor: 'pointer' }}>
+              {m === 'manual' ? 'I run them' : 'Automatic'}
+            </button>
+          ))}
+        </div>
+        <p style={{ color: T.dim, fontSize: 12.5, margin: '9px 0 0', maxWidth: 520 }}>
+          {st?.refundMode === 'auto'
+            ? 'Requested refunds go out on the next batch without asking you.'
+            : 'Requested refunds queue up until you run them from Marketing → refunds.'}
+        </p>
+      </div>
+
+      {msg && <p style={{ color: T.text, fontSize: 13.5, margin: '14px 0 0' }}>{msg}</p>}
+    </div>
+  );
+}
+
+function StaffAccess({ adminKey, eventId, events }: { adminKey: string; eventId: string; events: any[] }) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [label, setLabel] = useState('');
+  const [role, setRole] = useState('bar');
+  const [station, setStation] = useState('');
+  const [scopeThisEvent, setScopeThisEvent] = useState(true);
+  const [made, setMade] = useState<any>(null);
+  const [msg, setMsg] = useState('');
+
+  const call = async (payload: any) =>
+    fetch(`${BACKEND}/bar`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((r) => r.json());
+
+  const load = useCallback(async () => { const r = await call({ action: 'staff_list' }); if (!r.error) setRows(r.staff || []); }, [adminKey]);
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    if (!label.trim()) { setMsg('Give them a name'); return; }
+    setMsg('');
+    const r = await call({ action: 'staff_add', label: label.trim(), role, station: station.trim() || null, eventId: scopeThisEvent ? eventId : null });
+    if (r.error) { setMsg(r.error); return; }
+    setMade(r); setLabel(''); setStation(''); load();
+  };
+  const revoke = async (code: string, revoked: boolean) => { await call({ action: 'staff_revoke', code, revoked: !revoked }); load(); };
+
+  const evName = events.find((e) => e.id === eventId)?.name || 'this event';
+  return (
+    <div style={{ background: PANEL_BG, border: `1px solid ${T.line}`, borderRadius: 18, padding: 22, marginBottom: 22 }}>
+      <H>Staff &amp; access</H>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 16px', maxWidth: 560 }}>
+        Each person gets their own 6-character code. Scope it to one night and it stops working the next morning.
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 9, marginBottom: 10 }}>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Maria" style={INP} />
+        <select value={role} onChange={(e) => setRole(e.target.value)} style={INP}>
+          <option value="bar">Bar &mdash; ring drinks</option>
+          <option value="door">Door &mdash; scan &amp; check in</option>
+          <option value="manager">Manager &mdash; both + can void</option>
+        </select>
+        <input value={station} onChange={(e) => setStation(e.target.value)} placeholder="Bar 1 / Front door" style={INP} />
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: T.dim, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+        <input type="checkbox" checked={scopeThisEvent} onChange={(e) => setScopeThisEvent(e.target.checked)} style={{ width: 16, height: 16, accentColor: T.blue }} />
+        Only works at {evName} (uncheck for any event)
+      </label>
+      <button onClick={add} style={BTN}>Create code</button>
+      {msg && <p style={{ color: T.warn, fontSize: 13, margin: '10px 0 0' }}>{msg}</p>}
+
+      {made && (
+        <div style={{ marginTop: 14, background: 'rgba(17,64,240,0.12)', border: `1px solid ${T.blue}`, borderRadius: 12, padding: 16 }}>
+          <p style={{ color: T.dim, fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', margin: '0 0 6px' }}>{made.label}&apos;s code</p>
+          <p style={{ fontFamily: DISPLAY, fontSize: 34, color: '#fff', letterSpacing: 4, margin: '0 0 6px' }}>{made.code}</p>
+          <p style={{ color: T.text, fontSize: 13, margin: 0 }}>{made.where}. Text it to them &mdash; it&apos;s the only thing they need.</p>
+        </div>
+      )}
+
+      <div style={{ marginTop: 18 }}>
+        {rows.length === 0 && <p style={{ color: T.dim, fontSize: 13.5 }}>Nobody has access yet.</p>}
+        {rows.map((r) => (
+          <div key={r.code} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '11px 0', borderTop: `1px solid ${T.line2}`, opacity: r.revoked ? 0.4 : 1 }}>
+            <span>
+              <span style={{ color: T.white, fontSize: 14.5, fontFamily: HEAD, fontWeight: 700 }}>{r.code}</span>
+              <span style={{ color: T.text, fontSize: 14 }}> &middot; {r.label}</span>
+              <span style={{ display: 'block', color: T.dim, fontSize: 12.5, marginTop: 2 }}>
+                {r.role}{r.station ? ` · ${r.station}` : ''} · {r.scope} · used {r.lastUsed}
+              </span>
+            </span>
+            <button onClick={() => revoke(r.code, r.revoked)}
+              style={{ background: 'none', border: `1px solid ${T.line}`, color: r.revoked ? T.good : T.bad, borderRadius: 999, padding: '7px 13px', fontSize: 11.5, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+              {r.revoked ? 'Restore' : 'Revoke'}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BarMenu({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [products, setProducts] = useState<any[]>([]);
+  const [codes, setCodes] = useState<any[]>([]);
+  const [name, setName] = useState('');
+  const [price, setPrice] = useState('');
+  const [category, setCategory] = useState('Beer');
+  const [station, setStation] = useState('');
+  const [everyEvent, setEveryEvent] = useState(true);
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<any>(null);
+  const [taxPct, setTaxPct] = useState('');
+  const [taxIncluded, setTaxIncluded] = useState(false);
+  useEffect(() => {
+    if (!eventId) return;
+    fetch(`${BACKEND}/bartax`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ action: 'get', eventId }) })
+      .then((r) => r.json())
+      .then((d) => { if (d?.ok) { setTaxPct(String(d.percent ?? 0)); setTaxIncluded(!!d.included); } })
+      .catch(() => {});
+  }, [eventId, adminKey]);
+  const saveTax = async () => {
+    setMsg('');
+    const r = await fetch(`${BACKEND}/bartax`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+      body: JSON.stringify({ action: 'set', eventId, percent: Number(taxPct) || 0, included: taxIncluded }) }).then((x) => x.json());
+    // only claim it saved if the server says so, and show the worked example back
+    setMsg(r?.ok ? `Saved. ${r.example}` : (r?.error || 'Could not save the tax rate'));
+  };
+
+  const call = async (payload: any) =>
+    fetch(`${BACKEND}/bar`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((r) => r.json());
+
+  const load = useCallback(async () => {
+    const r = await call({ action: 'menu_list', eventId });
+    if (!r.error) setProducts(r.products || []);
+  }, [adminKey, eventId]);
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    if (!name.trim() || !price) { setMsg('Name and price, please'); return; }
+    setBusy(true); setMsg('');
+    const r = await call({ action: 'menu_add', name: name.trim(), price: Number(price), category, station: station.trim() || null, eventId: everyEvent ? null : eventId });
+    setBusy(false);
+    if (r.error) { setMsg(r.error); return; }
+    setName(''); setPrice(''); setStation('');
+    load();
+  };
+  const toggle = async (p: any) => { await call({ action: 'menu_update', productId: p.id, active: !p.active }); load(); };
+  const reprice = async (p: any) => {
+    const v = window.prompt(`New price for ${p.name}`, String(p.price));
+    if (v == null) return;
+    await call({ action: 'menu_update', productId: p.id, price: Number(v) });
+    load();
+  };
+  const pullReport = async () => { const r = await call({ action: 'sales_report', eventId }); if (!r.error) setReport(r); };
+
+  const cats = ['Beer', 'Liquor', 'Seltzer', 'Non-alcoholic', 'Food', 'Other'];
+  return (
+    <div style={{ background: PANEL_BG, border: `1px solid ${T.line}`, borderRadius: 18, padding: 22, marginBottom: 22 }}>
+      <H>Bar menu</H>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 16px', maxWidth: 560 }}>
+        What the bar can ring up. These never show on your event pages or the box office &mdash; the bar screen is the only thing that loads them.
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(130px,1fr))', gap: 9, marginBottom: 10 }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Modelo" style={INP} />
+        <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder="8" inputMode="decimal" style={INP} />
+        <select value={category} onChange={(e) => setCategory(e.target.value)} style={INP}>
+          {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <input value={station} onChange={(e) => setStation(e.target.value)} placeholder="Bar 1 (blank = all)" style={INP} />
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: T.dim, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+        <input type="checkbox" checked={everyEvent} onChange={(e) => setEveryEvent(e.target.checked)} style={{ width: 16, height: 16, accentColor: T.blue }} />
+        Available at every event (uncheck for this event only)
+      </label>
+      <button onClick={add} disabled={busy} style={{ ...BTN, marginBottom: 6 }}>{busy ? 'Adding…' : 'Add product'}</button>
+      {msg && <p style={{ color: T.warn, fontSize: 13, margin: '8px 0 0' }}>{msg}</p>}
+
+      <div style={{ marginTop: 18 }}>
+        {products.length === 0 && <p style={{ color: T.dim, fontSize: 13.5 }}>Nothing on the menu yet.</p>}
+        {products.map((p) => (
+          <div key={p.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '10px 0', borderTop: `1px solid ${T.line2}`, opacity: p.active ? 1 : 0.45 }}>
+            <span style={{ color: T.white, fontSize: 14.5 }}>
+              {p.name} <span style={{ color: T.dim }}>· {p.category}{p.station ? ` · ${p.station}` : ''}{p.event_id ? ' · this event' : ''}</span>
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
+              <button onClick={() => reprice(p)} style={{ background: 'none', border: 'none', color: T.white, fontFamily: DISPLAY, fontSize: 16, cursor: 'pointer' }}>${Number(p.price).toFixed(2)}</button>
+              <button onClick={() => toggle(p)} style={{ background: 'none', border: `1px solid ${T.line}`, color: T.dim, borderRadius: 999, padding: '6px 11px', fontSize: 11.5, cursor: 'pointer' }}>
+                {p.active ? 'Hide' : 'Show'}
+              </button>
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${T.line2}` }}>
+        <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: T.dim, margin: '0 0 8px' }}>Bar tax for this event</p>
+        <div style={{ display: 'flex', gap: 9, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input value={taxPct} onChange={(e) => setTaxPct(e.target.value)} placeholder="9.679"
+            inputMode="decimal" style={{ ...INP, width: 130 }} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: T.text, fontSize: 13.5, cursor: 'pointer' }}>
+            <input type="checkbox" checked={taxIncluded} onChange={(e) => setTaxIncluded(e.target.checked)} style={{ width: 16, height: 16, accentColor: T.blue }} />
+            Menu prices already include tax
+          </label>
+          <button onClick={saveTax} style={GHOST}>Save tax</button>
+        </div>
+        <p style={{ color: T.dim, fontSize: 12.5, margin: '8px 0 0', maxWidth: 520 }}>
+          Set the rate for this venue. Unticked, tax is added on top at the till. Ticked, it&apos;s backed out for the receipt and the guest pays the menu price. Tips are never taxed.
+        </p>
+      </div>
+
+      <button onClick={pullReport} style={{ ...GHOST, marginTop: 16 }}>Tonight&apos;s bar sales</button>
+      {report && (
+        <div style={{ marginTop: 12, background: GLASS_BG, border: `1px solid ${T.line}`, borderRadius: 12, padding: 14 }}>
+          <p style={{ fontFamily: DISPLAY, fontSize: 24, color: T.white, margin: '0 0 4px' }}>{report.total}</p>
+          <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 10px' }}>{report.sales} sales{report.voided ? ` · ${report.voided} voided` : ''}</p>
+          {(report.topItems || []).map((l: string) => <p key={l} style={{ color: T.text, fontSize: 13, margin: '3px 0' }}>{l}</p>)}
+          {(report.byStaff || []).length > 0 && (
+            <>
+              <p style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: T.dim, margin: '12px 0 5px' }}>By bartender</p>
+              {report.byStaff.map((l: string) => <p key={l} style={{ color: T.text, fontSize: 13, margin: '3px 0' }}>{l}</p>)}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DoorCheckIn({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [q, setQ] = useState('');
+  const [rows, setRows] = useState<any[]>([]);
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState('');
+  const call = (payload: any) => fetch(`${BACKEND}/door`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((r) => r.json());
+  useEffect(() => { setQ(''); setRows([]); setMsg(''); }, [eventId]);
+  useEffect(() => {
+    if (q.trim().length < 2) { setRows([]); return; }
+    const t = setTimeout(() => { call({ action: 'search', eventId, q: q.trim() }).then((d) => { if (d.orders) setRows(d.orders); }); }, 350);
+    return () => clearTimeout(t);
+  }, [q, eventId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const act = async (action: string, orderId: string, count: number) => {
+    setBusy(orderId); setMsg('');
+    try {
+      const r = await call({ action, eventId, orderId, count });
+      if (r.error) throw new Error(r.error);
+      setMsg(action === 'checkin' ? `✓ ${r.name}: ${r.justIn} in (${r.checkedIn}/${r.total})` : `↩ ${r.name}: undid ${r.undone} (${r.checkedIn}/${r.total})`);
+      setRows((prev) => prev.map((x) => x.orderId === orderId ? { ...x, checkedIn: r.checkedIn } : x));
+    } catch (e: any) { setMsg(`✗ ${e.message}`); }
+    finally { setBusy(''); }
+  };
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 18 }}>
+      <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 4px' }}>🚪 Door check-in (no QR needed)</p>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px', lineHeight: 1.5 }}>Search a name, phone, email, or order number — then check in as many of their tickets as walked up.</p>
+      <input style={{ ...INP, marginBottom: 10 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, phone, email, or order #" />
+      {msg && <p style={{ color: msg.startsWith('✗') ? '#ff6b6b' : '#5fd39a', fontSize: 13, fontWeight: 700, margin: '0 0 10px' }}>{msg}</p>}
+      {rows.map((r) => {
+        const left = r.total - r.checkedIn;
+        return (
+          <div key={r.orderId} style={{ borderTop: '1px solid rgba(255,255,255,0.07)', padding: '10px 0' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0 }}>
+                <p style={{ color: '#fff', fontSize: 14, fontWeight: 700, margin: 0 }}>{r.name} · <span style={{ color: T.dim, fontWeight: 400 }}>#{r.shortId}</span></p>
+                <p style={{ color: T.dim, fontSize: 12, margin: '2px 0 0' }}>{r.types}{r.seats ? ` · Seats ${r.seats}` : ''}</p>
+                <p style={{ color: left === 0 ? '#5fd39a' : '#f0b64b', fontSize: 12.5, fontWeight: 700, margin: '3px 0 0' }}>
+                  {r.checkedIn}/{r.total} checked in{left === 0 ? ' — all in ✓' : ` · ${left} left`}
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                {left > 0 && (
+                  <button onClick={() => act('checkin', r.orderId, 1)} disabled={busy === r.orderId}
+                    style={{ background: T.redBright, color: '#fff', border: 'none', borderRadius: 9, padding: '9px 14px', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                    Check in 1
+                  </button>
+                )}
+                {left > 1 && (
+                  <button onClick={() => act('checkin', r.orderId, left)} disabled={busy === r.orderId}
+                    style={{ background: 'rgba(255,255,255,0.12)', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 14px', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+                    All {left}
+                  </button>
+                )}
+                <button onClick={async () => {
+                  const to = window.prompt(`Text ${r.name} a link to their tickets.\nSend to:`, r.phone || '');
+                  if (to === null) return;
+                  setBusy(r.orderId); setMsg('');
+                  try {
+                    const d = await call({ action: 'text_tickets', eventId, orderId: r.orderId, ...(to.trim() ? { toPhone: to.trim() } : {}) });
+                    if (d.error) throw new Error(d.error);
+                    setMsg(`📲 Texted ${d.to} — they can open their tickets in one tap`);
+                  } catch (e: any) { setMsg(`✗ ${e.message}`); }
+                  finally { setBusy(''); }
+                }} disabled={busy === r.orderId}
+                  style={{ background: 'rgba(255,255,255,0.12)', color: '#fff', border: 'none', borderRadius: 9, padding: '9px 12px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                  📲 Text tickets
+                </button>
+                {r.checkedIn > 0 && (
+                  <button onClick={() => act('undo', r.orderId, 1)} disabled={busy === r.orderId}
+                    style={{ background: 'none', color: T.dim, border: 'none', fontSize: 12, cursor: 'pointer', padding: '9px 4px' }}>
+                    undo
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      {q.trim().length >= 2 && rows.length === 0 && <p style={{ color: T.dim, fontSize: 13, margin: 0 }}>No match — try a phone number or order #.</p>}
+    </div>
+  );
+}
+
+/* ---- PRINT TICKETS: cut a paper batch, print sheet opens ready to go ---- */
+function PrintTickets({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [tiers, setTiers] = useState<any[]>([]);
+  const [tierId, setTierId] = useState('');
+  const [qty, setQty] = useState('20');
+  const [label, setLabel] = useState('');
+  const [promo, setPromo] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [batches, setBatches] = useState<any[]>([]);
+  const call = (payload: any) => fetch(`${BACKEND}/printbatch`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((r) => r.json());
+  useEffect(() => {
+    setMsg(''); setBatches([]);
+    fetch(`${BACKEND}/checkout?eventId=${eventId}&info=1`).then((r) => r.json()).then((d) => { const t = d.ticketTypes || []; setTiers(t); if (t[0]) setTierId(t[0].id); }).catch(() => {});
+    call({ action: 'list', eventId }).then((d) => { if (d.batches) setBatches(d.batches); });
+  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const openPrintSheet = (batch: any) => {
+    const w = window.open('', '_blank');
+    if (!w) { setMsg('✗ Popup blocked — allow popups for this site'); return; }
+    const dt = batch.event.date ? new Date(batch.event.date).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+    const venue = (batch.event.location || '').split(',')[0];
+    const cards = batch.tickets.map((t: any) => {
+      const q = qrcode(0, 'M'); q.addData(t.token); q.make();
+      const img = q.createDataURL(4, 2);
+      return `<div class="tk"><div class="l"><p class="ev">${batch.event.name}</p><p class="m">${dt}</p><p class="m">${venue}</p><p class="tier">${batch.tier.name} · $${Number(batch.tier.price).toFixed(0)}</p><p class="n">#${String(t.n).padStart(3, '0')} · ${batch.label}</p></div><div class="r"><img src="${img}" /><p class="s">SCAN AT DOOR</p></div></div>`;
+    }).join('');
+    w.document.write(`<!DOCTYPE html><html><head><title>Print — ${batch.event.name}</title><style>
+      * { margin:0; padding:0; box-sizing:border-box; font-family: Helvetica, Arial, sans-serif; }
+      body { padding: 12px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .tk { border: 2px solid #000; border-radius: 10px; padding: 12px; display: flex; justify-content: space-between; gap: 10px; break-inside: avoid; page-break-inside: avoid; min-height: 150px; }
+      .ev { font-size: 15px; font-weight: 800; margin-bottom: 3px; }
+      .m { font-size: 11.5px; margin-bottom: 1px; }
+      .tier { font-size: 13px; font-weight: 800; margin-top: 6px; }
+      .n { font-size: 10px; color: #555; margin-top: 6px; }
+      .r { text-align: center; flex-shrink: 0; }
+      .r img { width: 128px; height: 128px; display: block; }
+      .s { font-size: 8px; letter-spacing: 1px; font-weight: 700; margin-top: 2px; }
+      @media print { .noprint { display: none; } body { padding: 0; } }
+    </style></head><body>
+      <div class="noprint" style="margin-bottom:12px;"><button onclick="window.print()" style="padding:10px 18px;font-size:15px;font-weight:800;cursor:pointer;">🖨 Print ${batch.tickets.length} tickets</button> <span style="font-size:12px;color:#666;">Cardstock recommended · cut along the borders</span></div>
+      <div class="grid">${cards}</div>
+    </body></html>`);
+    w.document.close();
+  };
+
+  const create = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const r = await call({ action: 'create', eventId, ticketTypeId: tierId, qty: Number(qty), label: label.trim() || 'Batch', promoterName: promo.trim() });
+      if (r.error) throw new Error(r.error);
+      setMsg(`✓ ${r.tickets.length} tickets created — print sheet opening`);
+      openPrintSheet(r);
+      call({ action: 'list', eventId }).then((d) => { if (d.batches) setBatches(d.batches); });
+    } catch (e: any) { setMsg(`✗ ${e.message}`); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 18 }}>
+      <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 4px' }}>🎫 Print tickets</p>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 14px', lineHeight: 1.5 }}>Paper tickets for hand-to-hand cash sales. Same QR system — they scan at the door exactly like digital ones, and the batch claims its inventory so online can never oversell.</p>
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginBottom: 10 }}>
+        <select value={tierId} onChange={(e) => setTierId(e.target.value)} style={{ ...INP, marginBottom: 0 }}>
+          {tiers.map((t: any) => <option key={t.id} value={t.id}>{t.name} · ${Number(t.price).toFixed(0)} · {t.remaining} left</option>)}
+        </select>
+        <input style={{ ...INP, marginBottom: 0 }} type="number" min="1" max="200" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+        <input style={{ ...INP, marginBottom: 0 }} value={label} placeholder="Batch label (e.g. Barbershop run)" onChange={(e) => setLabel(e.target.value)} />
+        <input style={{ ...INP, marginBottom: 0 }} value={promo} placeholder="Promoter name (optional)" onChange={(e) => setPromo(e.target.value)} />
+      </div>
+      <button onClick={create} disabled={busy || !tierId}
+        style={{ background: T.redBright, color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>
+        {busy ? 'Creating…' : `Create batch + print sheet`}
+      </button>
+      {msg && <p style={{ color: msg.startsWith('✓') ? '#5fd39a' : '#ff6b6b', fontSize: 12.5, fontWeight: 700, margin: '8px 0 0' }}>{msg}</p>}
+      {batches.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          {batches.map((b) => (
+            <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <span style={{ color: '#fff', fontSize: 13 }}>{b.label}</span>
+              <span style={{ color: T.dim, fontSize: 12.5 }}>{b.scanned}/{b.total} scanned · ${Number(b.faceValue).toFixed(0)} face</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- promoter tracking links: custom short codes, clicks + sales per promoter ---- */
+function PromoLinks({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [links, setLinks] = useState<any[]>([]);
+  const [pname, setPname] = useState('');
+  const [code, setCode] = useState('');
+  const [avail, setAvail] = useState<null | boolean>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const call = (payload: any) => fetch(`${BACKEND}/plink`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((r) => r.json());
+  const load = () => call({ action: 'list', eventId }).then((d) => { if (d.links) setLinks(d.links); });
+  useEffect(() => { setLinks([]); setMsg(''); load(); }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const c = code.trim();
+    if (c.length < 3) { setAvail(null); return; }
+    const t = setTimeout(() => { call({ action: 'check', code: c }).then((d) => setAvail(!!d.available)); }, 400);
+    return () => clearTimeout(t);
+  }, [code]); // eslint-disable-line react-hooks/exhaustive-deps
+  const create = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const r = await call({ action: 'create', eventId, code: code.trim(), promoterName: pname.trim() });
+      if (r.error) throw new Error(r.error);
+      setMsg(`✓ Live: ${r.url}`);
+      setPname(''); setCode(''); setAvail(null); load();
+    } catch (e: any) { setMsg(`✗ ${e.message}`); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 18 }}>
+      <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 4px' }}>🔗 Promoter links</p>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 14px', lineHeight: 1.5 }}>Give each promoter their own link — every click and sale through it counts under their name, separate from your own traffic.</p>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
+        <input style={INP} value={pname} placeholder="Promoter name (e.g. Juan)" onChange={(e) => setPname(e.target.value)} />
+        <div>
+          <input style={{ ...INP, marginBottom: 0 }} value={code} placeholder="custom code (e.g. juan-kc)" onChange={(e) => setCode(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} />
+          {code.trim().length >= 3 && avail !== null && (
+            <p style={{ color: avail ? '#5fd39a' : '#ff6b6b', fontSize: 11.5, margin: '4px 0 0', fontWeight: 700 }}>{avail ? `✓ /t/${code.trim()} is available` : `✗ /t/${code.trim()} is taken`}</p>
+          )}
+        </div>
+      </div>
+      <button onClick={create} disabled={busy || !pname.trim() || code.trim().length < 3 || avail === false}
+        style={{ background: T.redBright, color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 800, cursor: 'pointer', opacity: (!pname.trim() || code.trim().length < 3 || avail === false) ? 0.5 : 1 }}>
+        {busy ? 'Creating…' : 'Create link'}
+      </button>
+      {msg && <p style={{ color: msg.startsWith('✓') ? '#5fd39a' : '#ff6b6b', fontSize: 12.5, fontWeight: 700, margin: '8px 0 0', wordBreak: 'break-all' }}>{msg}</p>}
+      {links.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          {links.map((l) => (
+            <div key={l.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '9px 0', borderTop: '1px solid rgba(255,255,255,0.06)', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0 }}>
+                <p style={{ color: '#fff', fontSize: 13.5, fontWeight: 700, margin: 0 }}>{l.promoterName} · <span style={{ color: T.redBright }}>/t/{l.code}</span></p>
+                <p style={{ color: T.dim, fontSize: 12, margin: '2px 0 0' }}>{l.clicks} clicks · {l.tickets} tickets · ${Number(l.revenue).toFixed(2)}</p>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => { try { navigator.clipboard.writeText(`https://${l.url}`); setMsg(`✓ Copied ${l.url}`); } catch {} }} style={{ background: 'rgba(255,255,255,0.08)', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Copy</button>
+                <button onClick={async () => { if (confirm(`Delete /t/${l.code}? Stats stay on past orders.`)) { await call({ action: 'remove', id: l.id }); load(); } }} style={{ background: 'none', color: '#ff6b6b', border: 'none', fontSize: 12, cursor: 'pointer' }}>✕</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- BLAST CENTER (mass text with cost preview + timing tips) ---------------- */
+function timeAgo(iso: string) { const h = Math.round((Date.now() - new Date(iso).getTime()) / 3600e3); return h < 1 ? 'just now' : h < 24 ? `${h}h ago` : `${Math.round(h / 24)}d ago`; }
+function BlastCenter({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [data, setData] = useState<any>(null);
+  const [aud, setAud] = useState('');
+  const [msg, setMsg] = useState('');
+  const [preview, setPreview] = useState<any>(null);
+  const [showList, setShowList] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const call = (payload: any) => fetch(`${BACKEND}/blast`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((r) => r.json());
+  useEffect(() => { setAud(''); setPreview(null); setResult(null); setMsg(''); call({ action: 'audiences', eventId }).then((d) => { if (!d.error) setData(d); }).catch(() => {}); }, [eventId]);
+  useEffect(() => {
+    if (!aud) { setPreview(null); return; }
+    setShowList(false); setConfirm(false); setResult(null);
+    call({ action: 'preview', eventId, audience: aud }).then((d) => { if (!d.error) setPreview(d); }).catch(() => {});
+  }, [aud]);
+  if (!data) return null;
+
+  const evDate = data.event?.date ? new Date(data.event.date) : null;
+  const daysUntil = evDate ? Math.ceil((evDate.getTime() - Date.now()) / 86400e3) : null;
+  const dow = new Date().getDay();
+  const sel = data.audiences.find((a: any) => a.key === aud);
+  const link = data.event?.short_code ? ` tickets.gozaentertainment.com/t/${data.event.short_code}` : '';
+  const fullLen = (msg.trim() + link + ' Txt STOP to opt out').length;
+  const segs = fullLen <= 160 ? 1 : Math.ceil(fullLen / 153);
+  const cost = preview ? (preview.count * segs * (data.perSegment || 0.0119)) : 0;
+
+  const tips: string[] = [];
+  if (daysUntil !== null && daysUntil >= 0 && daysUntil <= 1) tips.push('🚨 Event is NOW — last-call blasts convert best 6-9pm.');
+  else if (daysUntil !== null && daysUntil >= 2 && daysUntil <= 4) tips.push(`🔥 ${daysUntil} days out — push-hard window. This is when fence-sitters buy.`);
+  if (dow === 5) tips.push("💸 It's Friday — payday. Best day of the week to ask for money.");
+  if (dow === 6) tips.push('🎉 Saturday afternoon = tonight-plans decision time. Text by 4pm.');
+  if (sel?.lastBlast && (Date.now() - new Date(sel.lastBlast.at).getTime()) < 48 * 3600e3) tips.push(`⚠️ You already texted this group ${timeAgo(sel.lastBlast.at)} — give it a beat unless it's urgent.`);
+  if (aud === 'customers') tips.push('📣 Full list = your whole reputation. Announcements and big drops only.');
+  if (segs > 1) tips.push(`✂️ Message is ${segs} segments — trim under 160 chars total to halve the cost.`);
+
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 18 }}>
+      <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 10px' }}>📣 Mass text</p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        {data.audiences.map((a: any) => (
+          <button key={a.key} onClick={() => setAud(a.key === aud ? '' : a.key)}
+            style={{ background: aud === a.key ? T.redBright : 'rgba(255,255,255,0.06)', color: '#fff', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 11, padding: '9px 13px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', textAlign: 'left' }}>
+            {a.label}<br />
+            <span style={{ fontWeight: 400, fontSize: 11.5, opacity: 0.85 }}>{a.count} people{a.lastBlast ? ` · ✓ texted ${timeAgo(a.lastBlast.at)}` : ' · never texted'}</span>
+          </button>
+        ))}
+      </div>
+      {tips.length > 0 && aud && (
+        <div style={{ background: 'rgba(240,182,75,0.08)', border: '1px solid rgba(240,182,75,0.25)', borderRadius: 10, padding: '10px 13px', marginBottom: 12 }}>
+          {tips.map((t, i) => <p key={i} style={{ color: '#f0b64b', fontSize: 12.5, margin: i ? '5px 0 0' : 0 }}>{t}</p>)}
+        </div>
+      )}
+      {aud && preview && (
+        <>
+          <textarea value={msg} onChange={(e) => setMsg(e.target.value)} rows={3} maxLength={300}
+            placeholder={`GOZA: ${data.event?.name || 'Event'} — tickets moving fast!`}
+            style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.14)', borderRadius: 11, color: '#fff', fontSize: 14, padding: '12px 13px', outline: 'none', resize: 'vertical', marginBottom: 8 }} />
+          <p style={{ color: T.dim, fontSize: 11.5, margin: '0 0 10px' }}>Event link + opt-out added automatically · {fullLen} chars = {segs} segment{segs > 1 ? 's' : ''} per text</p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(0,0,0,0.3)', borderRadius: 10, padding: '11px 14px', marginBottom: 10 }}>
+            <span style={{ color: '#fff', fontSize: 13.5, fontWeight: 700 }}>{preview.count} people · est. <span style={{ color: T.redBright }}>${cost.toFixed(2)}</span></span>
+            <button onClick={() => setShowList(!showList)} style={{ background: 'none', border: 'none', color: T.redBright, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}>{showList ? 'Hide details ▲' : 'More details ▼'}</button>
+          </div>
+          {showList && (
+            <div style={{ maxHeight: 200, overflowY: 'auto', background: 'rgba(0,0,0,0.3)', borderRadius: 10, padding: '8px 13px', marginBottom: 10 }}>
+              {preview.recipients.map((r: any, i: number) => (
+                <p key={i} style={{ color: '#ccc', fontSize: 12.5, margin: '4px 0', fontFamily: 'monospace' }}>{r.phone}{r.name ? ` · ${r.name}` : ''}</p>
+              ))}
+              {preview.count > preview.recipients.length && <p style={{ color: T.dim, fontSize: 12, margin: '6px 0 0' }}>…and {preview.count - preview.recipients.length} more</p>}
+            </div>
+          )}
+          {err && <p style={{ color: '#ff6b6b', fontSize: 13, margin: '0 0 8px' }}>{err}</p>}
+          {result && <p style={{ color: '#5fd39a', fontSize: 13, fontWeight: 700, margin: '0 0 8px' }}>✓ Sent to {result.sent} · ${Number(result.cost || 0).toFixed(2)}{result.failed ? ` · ${result.failed} failed` : ''}{result.flaggedDead ? ` · ${result.flaggedDead} dead flagged` : ''}</p>}
+          {!confirm ? (
+            <button onClick={() => setConfirm(true)} disabled={!msg.trim() || busy}
+              style={{ background: T.redBright, color: '#fff', border: 'none', borderRadius: 11, padding: '12px 18px', fontSize: 14, fontWeight: 800, cursor: 'pointer', opacity: !msg.trim() ? 0.5 : 1 }}>
+              Review send…
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={async () => { setBusy(true); setErr(''); try { const r = await call({ action: 'send', eventId, audience: aud, message: msg.trim() }); if (r.error) throw new Error(r.error); setResult(r); setConfirm(false); const d = await call({ action: 'audiences', eventId }); if (!d.error) setData(d); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } }}
+                disabled={busy}
+                style={{ background: '#d33', color: '#fff', border: 'none', borderRadius: 11, padding: '12px 18px', fontSize: 14, fontWeight: 800, cursor: 'pointer' }}>
+                {busy ? 'Sending…' : `Yes — send to ${preview.count} ($${cost.toFixed(2)})`}
+              </button>
+              <button onClick={() => setConfirm(false)} style={{ background: 'rgba(255,255,255,0.08)', color: '#fff', border: 'none', borderRadius: 11, padding: '12px 16px', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- RESERVED SEATING (generate + monitor the seat map) ---------------- */
+const SEAT_TEMPLATE = [
+  { label: 'A', count: 28, split: false }, { label: 'B', count: 28, split: false },
+  { label: 'C', count: 22, split: true }, { label: 'D', count: 24, split: true },
+  { label: 'E', count: 24, split: true }, { label: 'F', count: 24, split: true },
+  { label: 'G', count: 24, split: true },
+];
+function SeatingManager({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [map, setMap] = useState<any>(null);
+  const [types, setTypes] = useState<any[]>([]);
+  const [tier, setTier] = useState('');
+  const [rows, setRows] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const load = async () => {
+    try {
+      const [m, ev] = await Promise.all([
+        fetch(`${BACKEND}/seats?eventId=${eventId}`).then((r) => r.json()),
+        adminApi(adminKey, 'get_event', { eventId }),
+      ]);
+      setMap(m); setTypes(ev.ticketTypes || []);
+      if (!tier && ev.ticketTypes?.[0]) setTier(ev.ticketTypes[0].id);
+    } catch (e: any) { setErr(e.message); }
+  };
+  useEffect(() => { load(); }, [eventId]);
+  const call = async (payload: any) => {
+    setBusy(true); setErr(''); setMsg('');
+    try {
+      const r = await fetch(`${BACKEND}/seats`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify(payload) }).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      setMsg(payload.action === 'generate' ? `✓ Created ${r.created} seats` : '✓ Cleared unsold seats');
+      setRows([]); await load();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  if (!map) return null;
+  const hasSeats = map.hasSeats;
+  const counts = hasSeats ? map.rows.map((r: any) => ({ label: r.label, open: r.seats.filter((x: any) => x.status === 'open').length, sold: r.seats.filter((x: any) => x.status === 'sold').length, total: r.seats.length })) : [];
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 18 }}>
+      <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 2px' }}>🪑 Reserved seating</p>
+      {err && <p style={{ color: '#ff6b6b', fontSize: 13, margin: '6px 0' }}>{err}</p>}
+      {msg && <p style={{ color: '#5fd39a', fontSize: 13, margin: '6px 0' }}>{msg}</p>}
+
+      {hasSeats ? (
+        <>
+          <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px' }}>
+            Live seat map — <span style={{ color: T.redBright, fontWeight: 700 }}>{counts.reduce((a: number, c: any) => a + c.sold, 0)} sold</span> · {counts.reduce((a: number, c: any) => a + c.open, 0)} open · {counts.reduce((a: number, c: any) => a + c.total, 0)} total
+          </p>
+          <div style={{ background: '#17171d', borderRadius: 8, textAlign: 'center', color: T.dim, fontSize: 10.5, fontWeight: 800, letterSpacing: 4, padding: '5px 0', marginBottom: 10 }}>STAGE</div>
+          <div style={{ overflowX: 'auto', paddingBottom: 6 }}>
+            <div style={{ minWidth: 'max-content' }}>
+              {map.rows.map((row: any) => {
+                const L = row.seats.filter((x: any) => x.side === 'L');
+                const R = row.seats.filter((x: any) => x.side === 'R');
+                const C = row.seats.filter((x: any) => x.side === 'C' || !x.side);
+                const Dot = ({ x }: { x: any }) => (
+                  <span title={`${row.label}${x.n} — ${x.status}${x.tier ? ` · ${x.tier}` : ''}`}
+                    style={{ width: 15, height: 15, borderRadius: '50%', display: 'inline-block', flexShrink: 0,
+                      background: x.status === 'sold' ? T.redBright : x.status === 'held' ? '#f0b64b' : 'transparent',
+                      border: x.status === 'open' ? '1.5px solid rgba(255,255,255,0.4)' : '1.5px solid transparent' }} />
+                );
+                return (
+                  <div key={row.label} style={{ display: 'flex', alignItems: 'center', gap: 3, marginBottom: 4 }}>
+                    <span style={{ color: T.dim, fontSize: 10.5, fontWeight: 800, width: 16, flexShrink: 0 }}>{row.label}</span>
+                    {C.length > 0 && <span style={{ display: 'flex', gap: 3 }}>{C.map((x: any) => <Dot key={x.id} x={x} />)}</span>}
+                    {L.length > 0 && (<><span style={{ display: 'flex', gap: 3 }}>{L.map((x: any) => <Dot key={x.id} x={x} />)}</span><span style={{ width: 16, flexShrink: 0 }} /><span style={{ display: 'flex', gap: 3 }}>{R.map((x: any) => <Dot key={x.id} x={x} />)}</span></>)}
+                    <span style={{ color: T.dim, fontSize: 10.5, marginLeft: 8, whiteSpace: 'nowrap' }}>{row.seats.filter((x: any) => x.status === 'sold').length}/{row.seats.length}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+            <span style={{ color: T.dim, fontSize: 11 }}>🔴 sold</span>
+            <span style={{ color: T.dim, fontSize: 11 }}>🟡 held (in someone's cart)</span>
+            <span style={{ color: T.dim, fontSize: 11 }}>⚪ open</span>
+          </div>
+          <button onClick={() => { if (window.confirm('Delete all UNSOLD seats? Sold seats stay.')) call({ action: 'clear', eventId }); }} disabled={busy}
+            style={{ marginTop: 12, background: 'transparent', color: '#ff6b6b', border: '1px solid rgba(255,107,107,0.35)', borderRadius: 9, padding: '8px 14px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+            Clear unsold seats (rebuild map)
+          </button>
+        </>
+      ) : (
+        <>
+          <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px' }}>No seat map yet. Pick the price tier these seats sell as, then generate.</p>
+          <label style={LBL}>Default tier (each row can override below)</label>
+          <select style={{ ...INP, marginBottom: 10 }} value={tier} onChange={(e) => setTier(e.target.value)}>
+            {types.map((t: any) => <option key={t.id} value={t.id}>{t.name} (${Number(t.price).toFixed(2)})</option>)}
+          </select>
+          {types.length === 0 && <p style={{ color: '#f0b64b', fontSize: 12.5, margin: '0 0 10px' }}>Create a ticket type first (e.g. "Reserved Seat" at your seat price).</p>}
+          <button onClick={() => setRows(SEAT_TEMPLATE)} style={{ ...GHOST, marginRight: 8 }}>Load my A–G layout</button>
+          {rows.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              {rows.map((r: any, i: number) => (
+                <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 7 }}>
+                  <input style={{ ...INP, width: 54, marginBottom: 0 }} value={r.label} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, label: e.target.value.toUpperCase() } : x))} />
+                  <input style={{ ...INP, width: 72, marginBottom: 0 }} type="number" value={r.count} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, count: e.target.value } : x))} />
+                  <select style={{ ...INP, width: 150, marginBottom: 0 }} value={r.tierTicketTypeId || tier} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, tierTicketTypeId: e.target.value } : x))}>
+                    {types.map((t: any) => <option key={t.id} value={t.id}>{t.name} ${Number(t.price).toFixed(0)}</option>)}
+                  </select>
+                  <label style={{ color: T.dim, fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <input type="checkbox" checked={!!r.split} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, split: e.target.checked } : x))} /> aisle
+                  </label>
+                  <button onClick={() => setRows(rows.filter((_, j) => j !== i))} style={{ background: 'none', border: 'none', color: '#ff6b6b', cursor: 'pointer', fontSize: 15 }}>✕</button>
+                </div>
+              ))}
+              <button onClick={() => setRows([...rows, { label: '', count: 20, split: false }])} style={{ ...GHOST, marginRight: 8 }}>+ Row</button>
+              <button onClick={() => call({ action: 'generate', eventId, rows: rows.map((r) => ({ ...r, count: Number(r.count), tierTicketTypeId: r.tierTicketTypeId || tier })), tierTicketTypeId: tier })} disabled={busy || !tier}
+                style={{ background: T.redBright, color: '#fff', border: 'none', borderRadius: 9, padding: '9px 16px', fontSize: 13, fontWeight: 800, cursor: 'pointer', marginTop: 8 }}>
+                {busy ? 'Creating…' : 'Generate seat map'}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- ABANDONED CHECKOUTS (started buying, never finished) ---------------- */
+function AbandonedList({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [data, setData] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [busyId, setBusyId] = useState('');
+  const load = async () => {
+    try {
+      const r = await fetch(`${BACKEND}/leads`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ action: 'list', eventId }) }).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      setData(r);
+    } catch (e: any) { setErr(e.message); }
+  };
+  useEffect(() => { load(); }, [eventId]);
+  const nudge = async (leadId: string) => {
+    setBusyId(leadId); setErr('');
+    try {
+      const r = await fetch(`${BACKEND}/leads`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }, body: JSON.stringify({ action: 'nudge', leadId }) }).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      await load();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusyId(''); }
+  };
+  if (!data) return null;
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, marginTop: 18 }}>
+      <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 2px' }}>🎯 Leads & abandoned checkouts</p>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px' }}>
+        Capture-mode signups + people who started buying but never finished. {data.recovered > 0 ? `${data.recovered} came back and completed on their own. ` : ''}Tap "Text them" to send ONE reminder with the event link (1¢, one per person max).
+      </p>
+      {err && <p style={{ color: '#ff6b6b', fontSize: 13, margin: '0 0 10px' }}>{err}</p>}
+      {data.abandoned.length === 0 && <p style={{ color: T.dim, fontSize: 13, margin: 0 }}>{data.total === 0 ? 'None yet — when someone types their info at checkout but never pays, they show up here with a one-tap reminder button.' : 'Everyone who started checkout came back and finished. 🎉'}</p>}
+      {data.abandoned.map((l: any) => (
+        <div key={l.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ minWidth: 0 }}>
+            <p style={{ color: '#fff', fontSize: 13.5, fontWeight: 700, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.name || 'No name'} · <span style={{ fontFamily: 'monospace', fontWeight: 400 }}>{l.phone}</span></p>
+            <p style={{ color: T.dim, fontSize: 11.5, margin: '2px 0 0' }}>{new Date(l.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}{l.nudged ? ' · ✓ reminded' : ''}</p>
+          </div>
+          {!l.nudged && (
+            <button onClick={() => nudge(l.id)} disabled={busyId === l.id}
+              style={{ background: T.redBright, color: '#fff', border: 'none', borderRadius: 9, padding: '8px 13px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', flexShrink: 0, opacity: busyId === l.id ? 0.5 : 1 }}>
+              {busyId === l.id ? 'Sending…' : 'Text them'}
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- FAQ EDITOR (Q/A shown on the event page) ---------------- */
+function FaqEditor({ faqs, onChange }: { faqs: { q: string; a: string }[]; onChange: (f: { q: string; a: string }[]) => void }) {
+  const upd = (i: number, key: 'q' | 'a', val: string) => {
+    const next = faqs.map((f, idx) => idx === i ? { ...f, [key]: val } : f);
+    onChange(next);
+  };
+  return (
+    <div style={{ background: 'rgba(0,0,0,0.3)', border: `1px solid ${T.line}`, borderRadius: 12, padding: 14, marginTop: 4 }}>
+      <p style={{ color: '#fff', fontSize: 14, fontWeight: 700, margin: '0 0 4px' }}>❓ Q/A section</p>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px', lineHeight: 1.5 }}>Answer the questions people always DM you — age limit, dress code, parking, refunds, re-entry. Shows on the event page. Save the event to apply.</p>
+      {faqs.map((f, i) => (
+        <div key={i} style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${T.line}`, borderRadius: 10, padding: 12, marginBottom: 10 }}>
+          <input style={{ ...INP, marginBottom: 8 }} value={f.q} placeholder="Question (e.g. Is there an age limit?)" onChange={(e) => upd(i, 'q', e.target.value)} />
+          <textarea style={{ ...INP, minHeight: 56, resize: 'vertical', marginBottom: 8 }} value={f.a} placeholder="Answer" onChange={(e) => upd(i, 'a', e.target.value)} />
+          <button onClick={() => onChange(faqs.filter((_, idx) => idx !== i))}
+            style={{ background: 'transparent', color: '#ff6b6b', border: '1px solid rgba(255,107,107,0.35)', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+            Remove
+          </button>
+        </div>
+      ))}
+      <button onClick={() => onChange([...faqs, { q: '', a: '' }])} style={GHOST}>+ Add question</button>
+    </div>
+  );
+}
+
+/* ---------------- PRODUCTS (one-click offer catalog: create / delete) ---------------- */
+function Products({ adminKey }: { adminKey: string }) {
+  const [list, setList] = useState<any[]>([]);
+  const [name, setName] = useState('');
+  const [priceStr, setPriceStr] = useState('');
+  const [desc, setDesc] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async () => {
+    try { const r = await adminApi(adminKey, 'list_products', {}); setList(r.products || []); }
+    catch (e: any) { setErr(e.message); }
+  }, [adminKey]);
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!name.trim() || !(Number(priceStr) >= 0)) { setErr('Name and a price (0 or more) required'); return; }
+    setBusy(true); setErr('');
+    try {
+      await adminApi(adminKey, 'create_product', { name: name.trim(), price: Number(priceStr), description: desc.trim() });
+      setName(''); setPriceStr(''); setDesc('');
+      await load();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  const del = async (id: string, pname: string) => {
+    if (!window.confirm(`Delete "${pname}"? Events using it will have the offer removed.`)) return;
+    try { await adminApi(adminKey, 'delete_product', { productId: id }); await load(); }
+    catch (e: any) { setErr(e.message); }
+  };
+
+  return (
+    <div>
+      <H>Products</H>
+      <Sub>Things you can offer as one-click upsells / downsells after checkout — extra tickets, VIP upgrades, drink tickets, merch. Create them here, then pick them per event in the Events editor.</Sub>
+
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, maxWidth: 520, marginBottom: 26 }}>
+        <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: '0 0 12px' }}>New product</p>
+        <label style={LBL}>Name</label>
+        <input style={{ ...INP, marginBottom: 12 }} value={name} placeholder="+1 GA Ticket (half off)" onChange={(e) => setName(e.target.value)} />
+        <label style={LBL}>Price ($)</label>
+        <input style={{ ...INP, marginBottom: 12 }} type="number" min={0} step="0.01" value={priceStr} placeholder="12.50" onChange={(e) => setPriceStr(e.target.value)} />
+        <label style={LBL}>Pitch (shown on the offer page)</label>
+        <textarea style={{ ...INP, minHeight: 60, resize: 'vertical', marginBottom: 12 }} value={desc} placeholder="Bring a friend. One more ticket at half price - this deal only shows once." onChange={(e) => setDesc(e.target.value)} />
+        {err && <p style={{ color: T.redBright, fontSize: 13, margin: '0 0 10px' }}>{err}</p>}
+        <button style={{ ...BTN, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={create}>{busy ? 'Creating…' : 'CREATE PRODUCT'}</button>
+      </div>
+
+      {list.length === 0 ? (
+        <p style={{ color: T.dim, fontSize: 14 }}>No products yet.</p>
+      ) : list.map((p) => (
+        <div key={p.id} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 12, padding: '14px 16px', maxWidth: 520, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <p style={{ color: '#fff', fontSize: 14.5, fontWeight: 700, margin: '0 0 2px' }}>{p.name} <span style={{ color: T.redBright }}>${Number(p.price).toFixed(2)}</span></p>
+            {p.description && <p style={{ color: T.dim, fontSize: 12.5, margin: 0 }}>{p.description}</p>}
+          </div>
+          <button onClick={() => del(p.id, p.name)}
+            style={{ background: 'transparent', color: '#ff6b6b', border: '1px solid rgba(255,107,107,0.4)', borderRadius: 8, padding: '7px 12px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}>
+            Delete
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- DELETE EVENT (danger zone) ---------------- */
+function DeleteEvent({ adminKey, eventId, name, onDeleted }: { adminKey: string; eventId: string; name: string; onDeleted: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const del = async () => {
+    setBusy(true); setErr('');
+    try {
+      await adminApi(adminKey, 'delete_event', { eventId, confirm: 'DELETE' });
+      onDeleted();
+    } catch (e: any) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 28, borderTop: `1px solid ${T.line}`, paddingTop: 20 }}>
+      {!armed ? (
+        <button onClick={() => setArmed(true)}
+          style={{ background: 'transparent', color: '#ff6b6b', border: '1px solid rgba(255,107,107,0.4)', borderRadius: 10, padding: '10px 16px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>
+          Delete this event
+        </button>
+      ) : (
+        <div style={{ background: 'rgba(255,107,107,0.08)', border: '1px solid rgba(255,107,107,0.4)', borderRadius: 12, padding: 16 }}>
+          <p style={{ color: '#ff9a9a', fontSize: 14, fontWeight: 700, margin: '0 0 6px' }}>Delete &quot;{name}&quot; permanently?</p>
+          <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 12px', lineHeight: 1.5 }}>
+            This removes the event and all its orders, tickets, views, and signups. This cannot be undone. Type <strong style={{ color: '#fff' }}>DELETE</strong> to confirm.
+          </p>
+          <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="DELETE"
+            style={{ ...INP, marginBottom: 12 }} />
+          {err && <p style={{ color: '#ff8585', fontSize: 13, margin: '0 0 10px' }}>{err}</p>}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={del} disabled={typed !== 'DELETE' || busy}
+              style={{ background: '#e5484d', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13.5, fontWeight: 700, cursor: typed === 'DELETE' && !busy ? 'pointer' : 'default', opacity: typed === 'DELETE' && !busy ? 1 : 0.5 }}>
+              {busy ? 'Deleting…' : 'Permanently delete'}
+            </button>
+            <button onClick={() => { setArmed(false); setTyped(''); setErr(''); }} style={GHOST}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- DROP BLAST (text the notify list tickets are live) ---------------- */
+function DropBlast({ adminKey, eventId, signups }: { adminKey: string; eventId: string; signups: number }) {
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [confirm, setConfirm] = useState(false);
+  const [list, setList] = useState<any[] | null>(null);
+  const [loadingList, setLoadingList] = useState(false);
+  const toggleList = async () => {
+    if (list) { setList(null); return; }
+    setLoadingList(true);
+    try { const r = await adminApi(adminKey, 'notify_list', { eventId }); setList(r.signups || []); }
+    catch (e: any) { setErr(e.message); }
+    finally { setLoadingList(false); }
+  };
+
+  const blast = async () => {
+    setBusy(true); setErr('');
+    try {
+      const r = await adminApi(adminKey, 'notify_blast', { eventId, message: msg.trim() || undefined });
+      setResult(r); setConfirm(false);
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ background: `${T.redBright}12`, border: `1px solid ${T.redBright}55`, borderRadius: 14, padding: 18, marginBottom: 24, maxWidth: 520 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+        <p style={{ color: '#fff', fontSize: 15, fontWeight: 800, margin: 0 }}>🔔 {signups} on the notify list</p>
+        <button onClick={toggleList} style={{ background: 'none', border: 'none', color: T.redBright, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}>
+          {loadingList ? 'Loading…' : list ? 'Hide signups' : 'View signups'}
+        </button>
+      </div>
+      {list && (
+        <div style={{ maxHeight: 220, overflowY: 'auto', background: 'rgba(0,0,0,0.35)', borderRadius: 10, padding: '8px 12px', marginBottom: 12 }}>
+          {list.length === 0 && <p style={{ color: T.dim, fontSize: 13, margin: '6px 0' }}>No signups yet.</p>}
+          {list.map((n: any, i: number) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: i < list.length - 1 ? '1px solid rgba(255,255,255,0.06)' : 'none' }}>
+              <span style={{ color: n.dead ? '#777' : '#fff', fontSize: 13.5, fontFamily: 'monospace', textDecoration: n.dead ? 'line-through' : 'none' }}>{n.phone}</span>
+              <span style={{ color: T.dim, fontSize: 11.5 }}>
+                {new Date(n.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                {n.dead ? ' · ☠ dead' : n.notified ? ' · ✓ texted' : ' · waiting'}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <p style={{ color: T.dim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+        Text everyone who signed up that tickets are live. Leave the message blank to send the default &quot;tickets are LIVE&quot; text with the link.
+      </p>
+      {result ? (
+        <div style={{ background: 'rgba(61,220,132,0.12)', border: '1px solid rgba(61,220,132,0.4)', borderRadius: 10, padding: '12px 14px', color: '#b8f5d0', fontSize: 13.5 }}>
+          ✓ Sent to {result.sent}{result.failed > 0 ? ` · ${result.failed} failed` : ''}{result.flaggedDead > 0 ? ` · ${result.flaggedDead} dead numbers flagged (never texted again)` : ''}{result.skippedBad > 0 ? ` · ${result.skippedBad} known-dead skipped` : ''}
+        </div>
+      ) : !confirm ? (
+        <>
+          <textarea value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="Optional custom message (link added automatically)"
+            style={{ ...INP, minHeight: 70, resize: 'vertical', marginBottom: 12 }} />
+          {err && <p style={{ color: T.redBright, fontSize: 13, margin: '0 0 10px' }}>{err}</p>}
+          <button style={{ ...BTN, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={() => setConfirm(true)}>
+            TEXT THE LIST ({signups})
+          </button>
+        </>
+      ) : (
+        <div>
+          <p style={{ color: '#fff', fontSize: 14, margin: '0 0 12px' }}>Send to {signups} {signups === 1 ? 'person' : 'people'}? This sends real texts.</p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button style={{ ...BTN, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={blast}>{busy ? 'Sending…' : 'YES, SEND'}</button>
+            <button style={GHOST} onClick={() => setConfirm(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- BOX OFFICE (door sales by card) ---------------- */
+function BoxOffice({ adminKey, events, eventId, setEventId }: { adminKey: string; events: any[]; eventId: string; setEventId: (id: string) => void }) {
+  const [types, setTypes] = useState<any[]>([]);
+  const [ttId, setTtId] = useState('');
+  const [qty, setQty] = useState(1);
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [pk, setPk] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [done, setDone] = useState(false);
+  const [quote, setQuote] = useState<any>(null);
+
+  // if we returned from a successful card charge, show the success state
+  useEffect(() => {
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('boxoffice') === 'done') {
+      setDone(true);
+      // clean the URL so a refresh doesn't re-trigger
+      window.history.replaceState({}, '', '/admin');
+    }
+  }, []);
+
+  // load ticket types for the selected event
+  useEffect(() => {
+    if (!eventId) return;
+    setTypes([]); setTtId(''); setClientSecret(''); setDone(false); setQuote(null);
+    adminApi(adminKey, 'get_event', { eventId })
+      .then((d) => { const paid = (d.ticketTypes || []).filter((t: any) => Number(t.price) > 0); setTypes(paid); if (paid[0]) setTtId(paid[0].id); })
+      .catch((e) => setErr(e.message));
+  }, [eventId, adminKey]);
+
+  // live quote from the public checkout quote endpoint
+  useEffect(() => {
+    if (!eventId || !ttId) { setQuote(null); return; }
+    fetch(`${BACKEND}/checkout?eventId=${eventId}&ticketTypeId=${ttId}&quantity=${qty}`)
+      .then((r) => r.json()).then((d) => setQuote(d)).catch(() => setQuote(null));
+  }, [eventId, ttId, qty]);
+
+  const startCharge = async () => {
+    setLoading(true); setErr('');
+    try {
+      const [cfg, pi] = await Promise.all([
+        pk ? Promise.resolve({ publishableKey: pk }) : fetch(`${BACKEND}/box-office?config=1`).then((r) => r.json()),
+        fetch(`${BACKEND}/box-office`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+          body: JSON.stringify({ eventId, ticketTypeId: ttId, quantity: qty, buyerName: name.trim() || 'Door sale', buyerEmail: email.trim(), buyerPhone: phone.trim() }),
+        }).then((r) => r.json()),
+      ]);
+      if (cfg.error) throw new Error(cfg.error);
+      if (pi.error) throw new Error(pi.error);
+      setPk(cfg.publishableKey); setClientSecret(pi.clientSecret);
+    } catch (e: any) { setErr(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const reset = () => { setClientSecret(''); setDone(false); setName(''); setEmail(''); setPhone(''); setQty(1); setErr(''); };
+
+  const current = events.find((e) => e.id === eventId);
+
+  if (done) {
+    return (
+      <>
+        <H>Box Office</H>
+        <div style={{ background: T.card, border: `1px solid rgba(61,220,132,0.4)`, borderRadius: 16, padding: 28, maxWidth: 460, textAlign: 'center' }}>
+          <div style={{ width: 60, height: 60, borderRadius: '50%', background: 'rgba(61,220,132,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px', fontSize: 30 }}>✓</div>
+          <p style={{ color: '#fff', fontSize: 22, fontWeight: 800, margin: '0 0 6px' }}>Charged &amp; ticket sent</p>
+          <p style={{ color: T.dim, fontSize: 14, margin: '0 0 22px' }}>{qty} × ticket{qty > 1 ? 's' : ''}{email ? ` · emailed to ${email}` : ' · no email given (still scannable)'}</p>
+          <button style={BTN} onClick={reset}>NEW SALE</button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <H>Box Office</H>
+      <p style={{ color: T.dim, fontSize: 13.5, margin: '0 0 20px', maxWidth: 480, lineHeight: 1.6 }}>
+        Sell a ticket at the door by card. The buyer gets a scannable QR — email &amp; phone are optional (leave blank for a quick cash-register style sale; they can still be scanned in).
+      </p>
+
+      <div style={{ maxWidth: 480 }}>
+        <label style={LBL}>Event</label>
+        <select style={{ ...INP, marginBottom: 14 }} value={eventId} onChange={(e) => setEventId(e.target.value)}>
+          {events.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+
+        {types.length === 0 ? (
+          <p style={{ color: T.dim, fontSize: 14 }}>No paid ticket types on this event.</p>
+        ) : (
+          <>
+            <label style={LBL}>Ticket</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+              {types.map((t) => (
+                <button key={t.id} onClick={() => setTtId(t.id)} disabled={!!clientSecret}
+                  style={{ background: ttId === t.id ? T.red : '#141418', color: '#fff', border: `1px solid ${ttId === t.id ? T.red : 'rgba(255,255,255,0.12)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+                  {t.name} · {money(+t.price)}
+                </button>
+              ))}
+            </div>
+
+            <label style={LBL}>Quantity</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 14 }}>
+              <button onClick={() => setQty(Math.max(1, qty - 1))} disabled={!!clientSecret} style={{ width: 44, height: 44, borderRadius: 10, background: '#141418', border: `1px solid ${T.line}`, color: '#fff', fontSize: 22, cursor: 'pointer' }}>−</button>
+              <span style={{ color: '#fff', fontSize: 24, fontWeight: 800, minWidth: 30, textAlign: 'center' }}>{qty}</span>
+              <button onClick={() => setQty(Math.min(20, qty + 1))} disabled={!!clientSecret} style={{ width: 44, height: 44, borderRadius: 10, background: '#141418', border: `1px solid ${T.line}`, color: '#fff', fontSize: 22, cursor: 'pointer' }}>+</button>
+            </div>
+
+            <label style={LBL}>Buyer name (optional)</label>
+            <input style={{ ...INP, marginBottom: 12 }} value={name} disabled={!!clientSecret} onChange={(e) => setName(e.target.value)} placeholder="Door sale" />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
+              <div><label style={LBL}>Email (optional)</label>
+                <input style={INP} value={email} disabled={!!clientSecret} onChange={(e) => setEmail(e.target.value)} placeholder="for their QR" /></div>
+              <div><label style={LBL}>Phone (optional)</label>
+                <input style={INP} value={phone} disabled={!!clientSecret} onChange={(e) => setPhone(e.target.value)} placeholder="for SMS" /></div>
+            </div>
+
+            {quote && quote.total != null && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', background: '#141418', borderRadius: 12, padding: '14px 16px', marginBottom: 16, border: `1px solid ${T.line}` }}>
+                <span style={{ color: T.dim, fontSize: 14 }}>Total to charge</span>
+                <span style={{ color: '#fff', fontSize: 24, fontWeight: 800 }}>{money(quote.total)}</span>
+              </div>
+            )}
+
+            {err && <p style={{ color: T.redBright, fontSize: 13.5, margin: '0 0 14px' }}>{err}</p>}
+
+            {!clientSecret ? (
+              <button style={{ ...BTN, width: '100%', opacity: loading || !ttId ? 0.5 : 1 }} disabled={loading || !ttId} onClick={startCharge}>
+                {loading ? 'PREPARING…' : quote ? `TAKE PAYMENT · ${money(quote.total)}` : 'TAKE PAYMENT'}
+              </button>
+            ) : (
+              <div style={{ background: '#0e0e12', border: `1px solid ${T.line}`, borderRadius: 14, padding: 18 }}>
+                <p style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: '0 0 14px' }}>Enter card</p>
+                <CardCheckout
+                  publishableKey={pk}
+                  clientSecret={clientSecret}
+                  btn={T.red}
+                  returnUrl={typeof window !== 'undefined' ? `${window.location.origin}/admin?boxoffice=done` : '/admin'}
+                  onError={setErr}
+                />
+                <button onClick={() => setClientSecret('')} style={{ ...GHOST, width: '100%', marginTop: 12 }}>CANCEL</button>
+              </div>
+            )}
+          </>
+        )}
+
+      </div>
+    </>
+  );
+}
+
+
+function Appearance({ adminKey }: { adminKey: string }) {
+  const [color, setColor] = useState<string>('#c25b6e');
+  const [accent, setAccent] = useState<string>('#c25b6e');
+  const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const load = useCallback(() => {
+    setErr('');
+    adminApi(adminKey, 'get_settings', {}).then((d) => {
+      setColor(d.settings?.buttonColor || '#c25b6e');
+      setAccent(d.settings?.accentColor || '#c25b6e');
+    }).catch((e) => setErr(e.message));
+  }, [adminKey]);
+  useEffect(load, [load]);
+
+  const save = async () => {
+    setSaving(true); setErr(''); setSaved(false);
+    try {
+      await adminApi(adminKey, 'set_settings', { buttonColor: color, accentColor: accent });
+      setSaved(true); setTimeout(() => setSaved(false), 2500);
+    } catch (e: any) { setErr(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const swatches = ['#c25b6e', '#831100', '#7c3aed', '#2563eb', '#e11d48', '#059669', '#ea580c', '#db2777', '#0891b2'];
+
+  return (
+    <>
+      <H>Appearance</H>
+      <p style={{ color: T.dim, fontSize: 13.5, margin: '0 0 20px', maxWidth: 520, lineHeight: 1.6 }}>
+        The default colors for every event. Individual events can override these in their own settings.
+      </p>
+
+      <Sub>Default button color</Sub>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 10px', maxWidth: 520 }}>The Get Tickets / Pay buttons.</p>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, maxWidth: 520, marginBottom: 22 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+          {swatches.map((c) => (
+            <button key={c} onClick={() => setColor(c)} aria-label={c}
+              style={{ width: 36, height: 36, borderRadius: '50%', background: c, border: color.toLowerCase() === c ? '3px solid #fff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer' }} />
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+            style={{ width: 48, height: 42, background: 'none', border: `1px solid ${T.line}`, borderRadius: 10, cursor: 'pointer', padding: 2 }} />
+          <input style={{ ...INP, maxWidth: 150, fontFamily: 'monospace' }} value={color} onChange={(e) => setColor(e.target.value)} placeholder="#c25b6e" />
+          <span style={{ display: 'inline-flex', alignItems: 'center', background: color, color: '#fff', fontSize: 14, fontWeight: 700, padding: '12px 22px', borderRadius: 26 }}>Get Tickets</span>
+        </div>
+      </div>
+
+      <Sub>Default accent color</Sub>
+      <p style={{ color: T.dim, fontSize: 12.5, margin: '0 0 10px', maxWidth: 520 }}>The date text, the GOZA label, and other highlights.</p>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14, padding: 18, maxWidth: 520 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+          {swatches.map((c) => (
+            <button key={c} onClick={() => setAccent(c)} aria-label={c}
+              style={{ width: 36, height: 36, borderRadius: '50%', background: c, border: accent.toLowerCase() === c ? '3px solid #fff' : '1px solid rgba(255,255,255,0.2)', cursor: 'pointer' }} />
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input type="color" value={accent} onChange={(e) => setAccent(e.target.value)}
+            style={{ width: 48, height: 42, background: 'none', border: `1px solid ${T.line}`, borderRadius: 10, cursor: 'pointer', padding: 2 }} />
+          <input style={{ ...INP, maxWidth: 150, fontFamily: 'monospace' }} value={accent} onChange={(e) => setAccent(e.target.value)} placeholder="#c25b6e" />
+          <span style={{ display: 'inline-flex', alignItems: 'center', color: accent, fontSize: 13, fontWeight: 700, letterSpacing: 2 }}>SAT, AUG 22 · 8PM</span>
+        </div>
+      </div>
+
+      {err && <p style={{ color: T.redBright, fontSize: 13, margin: '16px 0 12px' }}>{err}</p>}
+      <button style={{ ...BTN, marginTop: 20, opacity: saving ? 0.5 : 1 }} disabled={saving} onClick={save}>
+        {saving ? 'SAVING…' : saved ? 'SAVED ✓' : 'SAVE COLORS'}
+      </button>
+    </>
+  );
+}
+
+function Fees({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [f, setF] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const load = useCallback(() => {
+    setErr(''); setF(null);
+    adminApi(adminKey, 'get_fees', { eventId }).then((d) => setF(d.fees || {
+      service_fee_percent: 5, service_fee_flat: 0, tax_percent: 0,
+      processing_percent: 2.9, processing_flat: 0.3,
+      pass_fees_to_buyer: true, pass_processing_to_buyer: true,
+    })).catch((e) => setErr(e.message));
+  }, [adminKey, eventId]);
+  useEffect(load, [load]);
+
+  const save = async () => {
+    setSaving(true); setErr(''); setSaved(false);
+    try { const d = await adminApi(adminKey, 'set_fees', { eventId, fees: f }); setF(d.fees); setSaved(true); }
+    catch (e: any) { setErr(e.message); }
+    finally { setSaving(false); }
+  };
+
+  if (err && !f) return <><H>Fees</H><Err msg={err} retry={load} /></>;
+  if (!f) return <><H>Fees</H><Loading /></>;
+
+  const num = (k: string, label: string, hint: string) => (
+    <div style={{ marginBottom: 16 }}>
+      <label style={LBL}>{label}</label>
+      <input type="number" step="0.1" min="0" value={f[k] ?? 0}
+        onChange={(e) => { setF({ ...f, [k]: e.target.value }); setSaved(false); }}
+        style={{ ...INP, maxWidth: 220 }} />
+      <p style={{ color: '#6a6060', fontSize: 11.5, margin: '5px 0 0' }}>{hint}</p>
+    </div>
+  );
+  const toggle = (k: string, label: string) => (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, cursor: 'pointer', fontSize: 14 }}>
+      <input type="checkbox" checked={!!f[k]} onChange={(e) => { setF({ ...f, [k]: e.target.checked }); setSaved(false); }}
+        style={{ width: 18, height: 18, accentColor: T.red }} />
+      <span style={{ color: T.text }}>{label}</span>
+    </label>
+  );
+
+  return (
+    <>
+      <H>Fees</H>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, padding: 22, maxWidth: 520 }}>
+        {num('service_fee_percent', 'Service fee %', 'Your fee, per order. Posh charges ~10%; you started at 5.')}
+        {num('service_fee_flat', 'Service fee flat $', 'Optional flat amount added per order.')}
+        {num('tax_percent', 'Tax %', 'Leave 0 unless you collect sales tax on tickets.')}
+        {num('processing_percent', 'Processing %', "Stripe's cut. Their standard rate is 2.9.")}
+        {num('processing_flat', 'Processing flat $', 'Stripe adds $0.30 per transaction.')}
+        <div style={{ height: 1, background: T.line, margin: '6px 0 18px' }} />
+        {toggle('pass_fees_to_buyer', 'Buyer pays the service fee')}
+        {toggle('pass_processing_to_buyer', 'Buyer pays the processing fee')}
+        {err && <p style={{ color: T.redBright, fontSize: 13, margin: '0 0 12px' }}>{err}</p>}
+        <button onClick={save} disabled={saving} style={{ ...BTN, opacity: saving ? 0.5 : 1 }}>
+          {saving ? 'SAVING…' : saved ? 'SAVED ✓' : 'SAVE'}
+        </button>
+        <p style={{ color: '#6a6060', fontSize: 11.5, margin: '14px 0 0' }}>
+          Fees are per-event. Changes apply to the next checkout instantly; paid orders keep their pricing.
+        </p>
+      </div>
+    </>
+  );
+}
+
+
+/* ---------------- ORDERS: contacts & purchases per event ---------------- */
+function Orders({ adminKey, eventId }: { adminKey: string; eventId: string }) {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [q, setQ] = useState('');
+  const [err, setErr] = useState('');
+
+  const load = useCallback(() => {
+    setErr(''); setRows(null);
+    adminApi(adminKey, 'list_orders', { eventId }).then((d) => setRows(d.orders)).catch((e) => setErr(e.message));
+  }, [adminKey, eventId]);
+  useEffect(load, [load]);
+
+  if (err) return <><H>Orders</H><Err msg={err} retry={load} /></>;
+  if (!rows) return <><H>Orders</H><Loading /></>;
+
+  const needle = q.trim().toLowerCase();
+  const filtered = needle
+    ? rows.filter((r) => `${r.buyer} ${r.email} ${r.phone} ${r.shortId}`.toLowerCase().includes(needle))
+    : rows;
+  const totalRevenue = rows.reduce((a, r) => a + Number(r.total || 0), 0);
+
+  return (
+    <>
+      <H>Orders</H>
+      <p style={{ color: T.dim, fontSize: 13, margin: '0 0 14px', letterSpacing: 1 }}>
+        {rows.length} order{rows.length === 1 ? '' : 's'} · {money(totalRevenue)} collected
+      </p>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="SEARCH NAME, PHONE, EMAIL, OR ORDER #"
+        style={{ ...INP, maxWidth: 460, letterSpacing: 1.5, marginBottom: 16 }} />
+
+      {filtered.length === 0 && <p style={{ color: T.dim, fontSize: 13.5 }}>{rows.length === 0 ? 'No orders yet.' : 'No matches.'}</p>}
+
+      {filtered.map((r) => (
+        <div key={r.id} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 12, padding: '14px 16px', marginBottom: 10, maxWidth: 720 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <p style={{ color: T.white, fontWeight: 600, fontSize: 14.5, margin: '0 0 2px' }}>
+                {r.buyer} <span style={{ color: T.dim, fontWeight: 400, fontSize: 12.5 }}>· #{r.shortId}</span>
+              </p>
+              <p style={{ color: T.dim, fontSize: 12.5, margin: 0, lineHeight: 1.7 }}>
+                {r.phone ? `${r.phone} · ` : ''}{r.email}<br />
+                {r.tickets} ticket{r.tickets === 1 ? '' : 's'} · {r.checkedIn} in · {new Date(r.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+              </p>
+              {r.deliveryError && <p style={{ color: T.redBright, fontSize: 12, margin: '4px 0 0' }}>Delivery issue: {r.deliveryError}</p>}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <Badge on={r.emailSent} yes="EMAILED" no="NO EMAIL" />
+              <Badge on={r.smsSent} yes="TEXTED" no="NO SMS" />
+              <span style={{ fontFamily: HEAD, fontWeight: 900, fontSize: 16, color: T.white }}>{money(r.total)}</span>
+            </div>
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
