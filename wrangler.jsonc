@@ -1,9 +1,9 @@
 {
-  "name": "goza-tickets",
-  "compatibility_date": "2026-08-01",
-  "main": "worker.js",
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "andrea-jose-show",
+  "compatibility_date": "2026-09-17",
   "assets": {
     "directory": "./out",
-    "binding": "ASSETS"
+    "not_found_handling": "single-page-application"
   }
 }
